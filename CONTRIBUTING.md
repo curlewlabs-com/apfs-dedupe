@@ -34,7 +34,10 @@ check and shellcheck run anywhere.
   test.
 - **Pin dependencies exactly.** GitHub Actions and tool versions are pinned to
   exact versions (the `pyright` / `shellcheck` / action pins in CI), so a
-  resolver cannot silently move them. Match that when adding any.
+  resolver cannot silently move them. Match that when adding any. The one
+  exception is `dtolnay/rust-toolchain@stable` in CI: it is a toolchain selector
+  rather than a version-pinned action, and the tool it builds — `fclones` — is
+  itself pinned (`cargo install fclones --version 0.35.0 --locked`).
 - **Comments explain _why_, not _what_.** `lib/apply.py` brands path strings as
   `FullPath` vs `Basename` (`NewType`s that pyright enforces in strict mode) so a
   directory-relative component cannot be passed where a resolvable path belongs;
