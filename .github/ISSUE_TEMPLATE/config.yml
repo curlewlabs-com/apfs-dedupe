@@ -1,0 +1,7 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/curlewlabs-com/apfs-dedupe/security/advisories/new
+    about: >-
+      Path/symlink safety, privilege, or data-safety issues — report these
+      privately here, not as a public issue.

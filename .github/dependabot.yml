@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # GitHub Actions is the only version-pinned dependency surface here — the tool
+  # itself is stdlib python plus brew-installed fclones and npx-run pyright, none
+  # of which has a manifest in the repo. Keep the action pins current.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

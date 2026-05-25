@@ -1,0 +1,53 @@
+name: Bug report
+description: Report incorrect behavior, a crash, or unexpected output
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a **security** issue — anything about path/symlink handling,
+        privilege, or data safety — do not file here. Use the Security tab's
+        **"Report a vulnerability"** instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected versus what actually occurred.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact command
+      description: The full command line, including whether you passed `--apply`.
+      placeholder: sudo ./apfs-dedupe.sh --apply --scope /Users/me/code
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      description: Output of `sw_vers -productVersion`, plus Apple silicon or Intel.
+      placeholder: "15.3, Apple silicon"
+    validations:
+      required: true
+  - type: input
+    id: fclones
+    attributes:
+      label: fclones version
+      description: Output of `fclones --version`.
+      placeholder: "0.35.0"
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output / logs
+      description: >
+        Paste the relevant lines. Scheduled runs log to
+        `~/Library/Logs/apfs-dedupe.log` (or `/Library/Logs/apfs-dedupe.log` for
+        `--system`).
+      render: shell
+    validations:
+      required: false
