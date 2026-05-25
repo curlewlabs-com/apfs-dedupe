@@ -1,5 +1,7 @@
 # apfs-dedupe
 
+[![CI](https://github.com/curlewlabs-com/apfs-dedupe/actions/workflows/ci.yml/badge.svg)](https://github.com/curlewlabs-com/apfs-dedupe/actions/workflows/ci.yml)
+
 Reclaim disk on macOS by turning duplicate files into **APFS clones** — independent
 files that share storage copy-on-write until one is modified. Safe to run against
 live data, with **complete metadata fidelity**: POSIX mode, owner, timestamps,
