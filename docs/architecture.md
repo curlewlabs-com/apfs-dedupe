@@ -38,7 +38,7 @@ that interval (the data is stranded under a temp name).
 Cloning into a temp and then `rename(2)`-ing it over the duplicate inverts this:
 the duplicate's path always resolves to either the old file or the new clone,
 never nothing, and a crash before the rename leaves the original completely
-untouched (only an orphaned `.apfsdedupe-*` temp dir to sweep). This is strictly safer on both the
+untouched (only an orphaned `.apfsdedupe-*` temp file to sweep). This is strictly safer on both the
 concurrent-reader and crash-recovery axes, and needs no exotic primitive — a plain
 atomic rename suffices (no `renamex_np`/`RENAME_SWAP` required).
 
