@@ -1,0 +1,54 @@
+name: CI
+
+# Gate every PR (and post-merge main) on the checks a contributor runs locally:
+# shellcheck + strict pyright on Linux, and the real-clonefile integration test
+# on macOS. See README "Development".
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6.0.2
+      # Pin shellcheck to an exact release rather than ubuntu's preinstalled,
+      # floating version: older shellcheck misfires SC2317 on the trap-invoked
+      # cleanup() that 0.11.0 (local dev) reads correctly.
+      - name: shellcheck
+        run: |
+          ver=0.11.0
+          url="https://github.com/koalaman/shellcheck/releases/download/v${ver}/shellcheck-v${ver}.linux.x86_64.tar.xz"
+          curl -fsSL "$url" | tar -xJ
+          "shellcheck-v${ver}/shellcheck" --version
+          "shellcheck-v${ver}/shellcheck" apfs-dedupe.sh install-daily.sh test/test.sh
+      - uses: actions/setup-node@v6.4.0
+        with:
+          node-version: 24.14.0
+      - name: pyright (strict)
+        run: npx --yes pyright@1.1.409
+
+  test:
+    # macOS 15+ only: the apply uses CLONE_NOFOLLOW_ANY, which Apple's headers do
+    # not define before 15, so the symlink-source test cases require a 15 runner.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: dtolnay/rust-toolchain@stable
+      # fclones publishes no macOS release asset, so build the exact crate
+      # version the wrapper contract smoke is pinned to.
+      - name: install fclones
+        run: |
+          cargo install fclones --version 0.35.0 --locked
+          test "$(fclones --version)" = "fclones 0.35.0"
+      - name: integration test (real APFS clonefile)
+        run: sh test/test.sh

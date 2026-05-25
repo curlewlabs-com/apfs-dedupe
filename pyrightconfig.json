@@ -1,0 +1,6 @@
+{
+  "include": ["lib"],
+  "typeCheckingMode": "strict",
+  "pythonVersion": "3.9",
+  "pythonPlatform": "Darwin"
+}
