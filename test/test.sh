@@ -37,7 +37,7 @@ ino()   { stat -f '%i'  "$1"; }
 perms() { stat -f '%Lp' "$1"; }
 mtime() { stat -f '%m'  "$1"; }
 
-# ---- Case 1: --apply clones and preserves all metadata, including the ACL ----
+# ---- --apply clones and preserves all metadata, including the ACL ----
 d="$WORK/meta"; mkdir "$d"
 head -c 1048576 /dev/urandom > "$d/canon"; cp "$d/canon" "$d/dup"
 chmod 644 "$d/canon"; chmod 600 "$d/dup"
@@ -57,14 +57,14 @@ case "$(ls -le "$d/dup")" in
     *) fail "apply: ACL was dropped" ;;
 esac
 
-# ---- Case 2: dry-run changes nothing ----
+# ---- dry-run changes nothing ----
 d="$WORK/dry"; mkdir "$d"
 head -c 1048576 /dev/urandom > "$d/canon"; cp "$d/canon" "$d/dup"
 ino_before=$(ino "$d/dup")
 report "$d/canon" "$d/dup" | python3 "$ENGINE" >/dev/null 2>&1
 assert_eq "dry-run: nothing changed (inode stable)" "$(ino "$d/dup")" "$ino_before"
 
-# ---- Case 3: fail-safe on an immutable file, and the skip names the full path ----
+# ---- fail-safe on an immutable file, and the skip names the full path ----
 d="$WORK/locked"; mkdir "$d"
 head -c 1048576 /dev/urandom > "$d/canon"; cp "$d/canon" "$d/dup"
 chflags uchg "$d/dup"
@@ -86,7 +86,7 @@ case "$err" in
     *) fail "diagnostics: skip warning lacks full path (got: $err)" ;;
 esac
 
-# ---- Case 4: false-equal guard -- same size, different bytes, must NOT clone ----
+# ---- false-equal guard -- same size, different bytes, must NOT clone ----
 d="$WORK/falseeq"; mkdir "$d"
 head -c 1048576 /dev/urandom > "$d/canon"
 head -c 1048576 /dev/urandom > "$d/dup"   # same size, different content
@@ -98,7 +98,7 @@ else
     fail "verify: clobbered a file whose content did not match"
 fi
 
-# ---- Case 5: the removed verification bypass is rejected before it can act ----
+# ---- the removed verification bypass is rejected before it can act ----
 # The byte re-compare is the live-data safety boundary. A stale bypass spelling
 # must fail closed at both entrypoints and leave mismatched files untouched.
 d="$WORK/removed-noverify"; mkdir "$d"
@@ -118,12 +118,12 @@ else
     fail "verify: wrapper accepted removed bypass or modified mismatched bytes (rc=$rc)"
 fi
 
-# ---- Case 6: the /Users-not-/ guard refuses whole-machine roots ----
+# ---- the /Users-not-/ guard refuses whole-machine roots ----
 # (the guard runs before the fclones check, so this needs no fclones on PATH)
 rc=0; "$SCRIPT" --scope / >/dev/null 2>&1 || rc=$?
 if [ "$rc" -ne 0 ]; then pass "guard: refuses --scope /"; else fail "guard: did not refuse --scope /"; fi
 
-# ---- Case 7: privileged ops are fd-anchored, so a swapped parent directory
+# ---- privileged ops are fd-anchored, so a swapped parent directory
 # cannot redirect the clone (root symlink/TOCTOU privilege-escalation guard) ----
 # clonefile follows symlinks in the destination *path*, so doing the
 # clone/rename by path in a user-writable directory lets a local user who owns
@@ -156,7 +156,7 @@ else
     fail "fd-anchor: redirect not prevented (rc=$rc, attacker-dir='$(ls -A "$d/attacker" 2>/dev/null)')"
 fi
 
-# ---- Case 8: a symlink in an INTERMEDIATE path component is refused ----
+# ---- a symlink in an INTERMEDIATE path component is refused ----
 # O_NOFOLLOW guards only the final component, so an attacker who owns an
 # ancestor of the duplicate could swap an intermediate directory for a symlink
 # to redirect where the parent fd lands. _open_parent_dir uses O_NOFOLLOW_ANY,
@@ -182,7 +182,7 @@ else
     fail "path: intermediate symlink component not refused (rc=$rc)"
 fi
 
-# ---- Case 9: a symlink in the clone SOURCE path is refused ----
+# ---- a symlink in the clone SOURCE path is refused ----
 # The clone itself must refuse a symlinked source path -- otherwise a local user
 # who owns an ancestor of the canonical could race in an intermediate symlink
 # and have root clone an arbitrary same-volume file (e.g. a root-only secret)
@@ -211,8 +211,8 @@ else
     fail "source: symlinked source not refused (rc=$rc, dup changed: $([ "$dup_before" = "$dup_after" ] && echo no || echo yes))"
 fi
 
-# ---- Case 10: a symlink as the clone-source FINAL component is refused ----
-# Distinct from Case 8 (intermediate component): here canonical *itself* is the
+# ---- a symlink as the clone-source FINAL component is refused ----
+# Distinct from the intermediate-component case: here canonical *itself* is the
 # symlink. CLONE_NOFOLLOW_ANY refuses a symlink in ANY source component, the
 # last one included, so the clone fails (skip) rather than cloning the link
 # target's bytes into the duplicate.
@@ -237,7 +237,7 @@ else
     fail "source: symlinked final component not refused (rc=$rc)"
 fi
 
-# ---- Case 11: the apply-mode macOS version gate is enforced in the engine ----
+# ---- the apply-mode macOS version gate is enforced in the engine ----
 # apply.py is itself a runnable root-capable engine, so it must refuse --apply
 # below macOS 15 on its own, not only via the shell wrapper. macOS 15 is the
 # floor because <sys/clonefile.h> first defines CLONE_NOFOLLOW_ANY there; on
@@ -260,7 +260,7 @@ else
     fail "version gate: boundary logic wrong"
 fi
 
-# ---- Case 12: a hard-linked duplicate is left intact (never break hard links) --
+# ---- a hard-linked duplicate is left intact (never break hard links) --
 # A duplicate that is also hard-linked to a path outside its group must NOT be
 # cloned: cloning would break the hard link (splitting one inode into two
 # independent files) and reclaim nothing, since the other link still pins the
@@ -293,7 +293,7 @@ case "$dry" in
     *) fail "hard link: dry-run over-counted a hard-linked dup (got: $dry)" ;;
 esac
 
-# ---- Case 13: --exclude globs reach fclones intact (no word-split, no globbing) --
+# ---- --exclude globs reach fclones intact (no word-split, no globbing) --
 # The wrapper builds fclones's argument vector. An exclude glob with a space
 # (e.g. "Application Support") must arrive as ONE argument, and a glob such as
 # *.log must be passed literally, not expanded against the cwd. We stub fclones
@@ -321,7 +321,7 @@ else
     fail "excludes: glob was expanded against the cwd (argv: $(tr '\n' '|' < "$d/argv" 2>/dev/null))"
 fi
 
-# ---- Case 14: the plan/actions go to STDOUT, not stderr (so '> file' keeps them) --
+# ---- the plan/actions go to STDOUT, not stderr (so '> file' keeps them) --
 # The per-file report is the dry-run's primary output; it must be on stdout, or a
 # user redirecting with '> plan.txt' loses everything but the summary (progress
 # and warnings stay on stderr). Capture stdout only (2>/dev/null) and assert the
@@ -340,7 +340,7 @@ case "$applied" in
     *) fail "apply: clone not recorded on stdout (got: $applied)" ;;
 esac
 
-# ---- Case 15: the wrapper consumes real fclones JSON and feeds the apply engine ----
+# ---- the wrapper consumes real fclones JSON and feeds the apply engine ----
 # The direct engine cases above deliberately hand-build fclones-shaped reports so
 # they can focus on apply invariants. This smoke covers the separate external
 # contract: the real wrapper command, fclones JSON output, and engine stdin path
@@ -362,7 +362,7 @@ else
     fail "wrapper: real fclones apply did not clone a duplicate (got: $applied)"
 fi
 
-# ---- Case 16: _human formats sizes at the unit boundaries, incl. the GiB->TiB
+# ---- _human formats sizes at the unit boundaries, incl. the GiB->TiB
 # fall-through (>= 1024 GiB must stay labelled TiB -- the last unit -- not fall
 # off the table). Guards the loop's terminal case; pure formatting, so the
 # function is checked by direct import rather than through a clone. ----
@@ -383,7 +383,7 @@ else
     fail "format: _human boundary formatting is wrong"
 fi
 
-# ---- Case 17: a duplicate already cloned on an earlier run is detected via its
+# ---- a duplicate already cloned on an earlier run is detected via its
 # physical extent and left untouched -- not re-cloned -- with its space reported
 # as already-saved, in apply and dry-run alike (via F_LOG2PHYS_EXT). This
 # is the whole point of the re-run check: a second sweep must reclaim nothing
@@ -423,7 +423,7 @@ case "$dry" in
     *) fail "already-shared: dry-run over-projected reclaimable space (got: $dry)" ;;
 esac
 
-# ---- Case 18: sparse files report allocated reclaim separately from logical bytes ----
+# ---- sparse files report allocated reclaim separately from logical bytes ----
 # A sparse duplicate can have a large logical size while holding no allocated
 # blocks. Counting only st_size would make the primary reclaim figure look like
 # disk space that never existed, so the summary must lead with allocated bytes
@@ -437,7 +437,7 @@ case "$dry" in
     *) fail "accounting: sparse duplicate over-reported physical reclaim (got: $dry)" ;;
 esac
 
-# ---- Case 19: a partially-shared file is never trusted as already-shared
+# ---- a partially-shared file is never trusted as already-shared
 # (regression guard for the partial-share false-positive). A clone whose later range is
 # CoW-broken by an identical-bytes rewrite shares its FIRST extent but has
 # private later extents, yet stays byte-identical -- so fclones still groups it.
@@ -477,7 +477,7 @@ else
     fail "partial-share: a multi-extent or device-blind match could over-report/skip"
 fi
 
-# ---- Case 20: cloud-backed roots are excluded from the scan by default, so a
+# ---- cloud-backed roots are excluded from the scan by default, so a
 # broad run never reads -- and re-downloads -- evicted iCloud Drive / File
 # Provider / Photos content; --include-cloud opts back in. The download would
 # happen at fclones read-time, so the protection must be a scan exclude (not just
@@ -505,7 +505,7 @@ else
     pass "dataless: --include-cloud opts back into scanning the cloud roots"
 fi
 
-# ---- Case 21: a dataless (cloud-evicted) file is detected from the SF_DATALESS
+# ---- a dataless (cloud-evicted) file is detected from the SF_DATALESS
 # st_flags bit alone -- never by reading it, which would fault it down from the
 # cloud -- and is not confused with an unrelated flag like UF_COMPRESSED. This is
 # the apply-path backstop's detection logic (full skip behavior needs a real File
@@ -525,7 +525,7 @@ else
     fail "dataless: flag detection is wrong"
 fi
 
-# ---- Case 22: the --git preset lowers --min to 1 -- every non-empty file frees
+# ---- the --git preset lowers --min to 1 -- every non-empty file frees
 # a whole 4 KiB block when deduped, so there is no useful floor for git-/CI-heavy
 # trees -- and an explicit --min still overrides it, in either order.
 # Stub fclones to report the --min value it actually received. ----
@@ -543,7 +543,7 @@ assert_eq "min: explicit --min after --git wins" "$(cat "$d/argv")" "min=4096"
 PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" --min 4096 --git >/dev/null 2>&1 || true
 assert_eq "min: explicit --min before --git wins (order-independent)" "$(cat "$d/argv")" "min=4096"
 
-# ---- Case 23: after --apply, the tool warns that local Time Machine snapshots
+# ---- after --apply, the tool warns that local Time Machine snapshots
 # may still hold the reclaimed space (a common source of confusion) -- a note
 # only, on stderr, never deleting snapshots; and no note when none are present.
 # Stub fclones (empty report) and tmutil to control whether snapshots "exist". ----
@@ -572,10 +572,10 @@ case "$note2" in
     *) pass "snapshots: no note when there are no local snapshots" ;;
 esac
 
-# ---- Case 24: app-private Library data (Mail/Messages/Safari/Containers) is
+# ---- app-private Library data (Mail/Messages/Safari/Containers) is
 # excluded from the scan by default -- it is TCC-protected (so scanning prompts
 # for or is denied access) and a poor dedup target -- and --include-app-data opts
-# back in. Same flag-gated argv construction as the cloud excludes (Case 18), an
+# back in. Same flag-gated argv construction as the cloud excludes, an
 # independent branch with a real consequence (privacy + prompt noise), so stub
 # fclones to record its argv and assert the defaults are present, then dropped
 # under the flag. ----
