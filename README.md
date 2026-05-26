@@ -7,10 +7,38 @@ files that share storage copy-on-write until one is modified. Safe to run agains
 live data, with **complete metadata fidelity**: POSIX mode, owner, timestamps,
 extended attributes, and **ACLs**.
 
+**Dry-run is the default. It shows what it would reclaim and changes nothing — you
+opt into changes with `--apply`.**
+
+## Quick start
+
 ```sh
-sudo ./apfs-dedupe.sh            # dry-run over /Users: shows what it would reclaim
-sudo ./apfs-dedupe.sh --apply    # do it
+brew install fclones                      # the one dependency
+git clone https://github.com/curlewlabs-com/apfs-dedupe.git
+cd apfs-dedupe
+./apfs-dedupe.sh --scope ~/Projects       # dry-run: shows what it would reclaim
 ```
+
+```
+Scanning /Users/you/Projects (files >= 1M) with fclones...
+fclones: Found 3 (7.3 MB) redundant files
+
+DRY RUN -- nothing changed. Re-run with --apply to reclaim the space below.
+
+would clone /Users/you/Projects/webapp/node_modules/ui-kit/bundle.js -> /Users/you/Projects/webapp-backup/node_modules/ui-kit/bundle.js  (4.0 MiB allocated)
+would clone /Users/you/Projects/webapp/assets.tar -> /Users/you/Projects/webapp-backup/assets.tar  (2.0 MiB allocated)
+would clone /Users/you/Projects/webapp/icon.png -> /Users/you/Projects/webapp-backup/icon.png  (1.0 MiB allocated)
+would reclaim: 7.0 MiB allocated (7.0 MiB logical) across 3 files
+```
+
+Like the plan? Add `--apply` to do it (requires macOS 15+):
+
+```sh
+./apfs-dedupe.sh --apply --scope ~/Projects
+```
+
+To sweep every account on the machine, run it as root over the default `/Users`
+scope: `sudo ./apfs-dedupe.sh` (still a dry-run), then `sudo ./apfs-dedupe.sh --apply`.
 
 ## Why this exists
 
@@ -98,12 +126,7 @@ files can't be modified in any case (they would simply error and be skipped).
   *are* scanned (Desktop/Documents/Downloads), grant your terminal **Full Disk
   Access** — see [Usage](#usage).
 
-## Install
-
-```sh
-brew install fclones
-git clone https://github.com/curlewlabs-com/apfs-dedupe.git && cd apfs-dedupe
-```
+## Requirements
 
 Requires macOS (APFS), `fclones`, and `python3` (Xcode Command Line Tools —
 already present on most dev machines). `--apply` additionally requires **macOS
