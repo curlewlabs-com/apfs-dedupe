@@ -2,10 +2,16 @@
 
 [![CI](https://github.com/curlewlabs-com/apfs-dedupe/actions/workflows/ci.yml/badge.svg)](https://github.com/curlewlabs-com/apfs-dedupe/actions/workflows/ci.yml)
 
-Reclaim disk on macOS by turning duplicate files into **APFS clones** — independent
-files that share storage copy-on-write until one is modified. Safe to run against
-live data, with **complete metadata fidelity**: POSIX mode, owner, timestamps,
-extended attributes, and **ACLs**.
+Reclaim disk on macOS by replacing byte-identical duplicate files with **APFS
+clones** — independent files that share storage copy-on-write until one is modified.
+
+Finding duplicates is a solved problem — [`fclones`](https://github.com/pkolaczk/fclones)
+does it well, so this tool delegates detection to it. The hard part is the **apply**,
+and that's the point of `apfs-dedupe`: it is **crash-safe** (no instant where the file
+is missing, even if the process dies mid-swap), **re-verifies the bytes** against a
+frozen clone immediately before replacing, stays **symlink- and TOCTOU-safe** when run
+as root over user-writable directories, and preserves a file's metadata in full —
+**including its ACLs**, which other reflink dedupers drop.
 
 **Dry-run is the default. It shows what it would reclaim and changes nothing — you
 opt into changes with `--apply`.**
@@ -40,17 +46,15 @@ Like the plan? Add `--apply` to do it (requires macOS 15+):
 To sweep every account on the machine, run it as root over the default `/Users`
 scope: `sudo ./apfs-dedupe.sh` (still a dry-run), then `sudo ./apfs-dedupe.sh --apply`.
 
-## Why this exists
+## Why not just `fclones dedupe`?
 
-macOS ships no deduplication. [`fclones`](https://github.com/pkolaczk/fclones) is
-excellent at *finding* duplicates — fast, parallel, well-tested — so this tool
-delegates detection to it. The novel part is the **apply**, where the existing
-tools have two macOS gaps:
+[`fclones`](https://github.com/pkolaczk/fclones) can do the dedupe apply too
+(`fclones dedupe`); on macOS that path has two gaps:
 
 - **A vanishing-file window.** `fclones dedupe` renames the original aside, *then*
   clones over it — so the path briefly has no file, and stays that way if the
   process dies between the two steps.
-- **Dropped ACLs.** `clonefile` copies the *source's* metadata; the tools restore
+- **Dropped ACLs.** `clonefile` copies the *source's* metadata; dedupers restore
   POSIX bits / owner / times / xattrs but lose the file's ACLs.
 
 `apfs-dedupe` does the apply itself, correctly — every step relative to a file
