@@ -131,34 +131,32 @@ A re-run finds the same duplicate groups as the first, but the duplicates are no
 clones — so cloning them again would only churn inodes and reclaim nothing. The
 engine detects this and leaves them alone, in `--apply` and dry-run alike.
 
-The check is one `fcntl(F_LOG2PHYS_EXT)` per file, comparing where the canonical and
-each duplicate physically live. It trusts a match **only when a file is stored as a
-single contiguous extent spanning its whole size**, and **only on the same device** —
-then an equal device offset is *proof* the two share all their storage, never a
-coincidence, because a physical block belongs to exactly one allocation (clones
-included). The compared identity carries the device id, since an offset is meaningful
-only within its device: the wrapper's `--one-fs` already keeps a group on one volume,
-but the engine runs on arbitrary `fclones` JSON, so it reconfirms rather than assumes. A matching *first* extent is
-deliberately **not** treated as enough: a clone whose later range was CoW-broken by an
-identical-bytes rewrite still shares byte 0 and stays byte-identical (so `fclones`
-still groups it), yet its later extents are private — skipping it would reclaim nothing
-forever and over-count its full size as saved. Such a file has more than one extent, so
-its first run is shorter than its size, the probe returns "unknown", and it is cloned
-normally. The error is one-directional and safe: the check only ever *fails to prove*
-sharing (a missed reclaim — the file is cloned, never corrupted); it never asserts
-whole-file sharing that isn't there.
+The check walks each file's **full extent map** — `fcntl(F_LOG2PHYS_EXT)` from byte 0
+to EOF — and trusts a match **only when the canonical and the duplicate have identical
+maps on the same device**. Then every data extent sits at the same physical device
+offset, which is *proof* the two reference the same blocks (a clone), never a
+coincidence, because a physical block belongs to exactly one allocation; and any holes
+line up. The compared identity carries the device id, since an offset is meaningful only
+within its device: the wrapper's `--one-fs` already keeps a group on one volume, but the
+engine runs on arbitrary `fclones` JSON, so it reconfirms rather than assumes.
 
-The cost of that conservatism is that a fully-cloned but **fragmented** file is
-re-cloned each run rather than recognized (a harmless missed optimization — the
-pre-existing behavior). Extending the check to multi-extent files by comparing the full
-extent map is a possible future enhancement.
+A *partial* match is never enough, and the full-map walk is what rejects it: a clone
+whose later range was CoW-broken by an identical-bytes rewrite still shares its first
+extent and stays byte-identical (so `fclones` still groups it), yet its rewritten extent
+now sits at a different device offset — so its map differs from the canonical's and it is
+cloned normally, re-sharing the diverged range. The error is one-directional and safe:
+the check only ever *fails to prove* sharing (a missed reclaim — the file is cloned,
+never corrupted); it never asserts sharing that isn't there. A fragmented or sparse
+clone, by contrast, has the *same* map as its source and is correctly recognized, so a
+re-run reclaims nothing on it instead of re-cloning it and re-counting its size — which
+is why re-running over an already-deduped tree is cheap whatever the file sizes.
 
-"Unknown" also covers an empty file, a leading hole, and a transparently compressed
-(decmpfs) file whose bytes live in an xattr rather than the data fork (`ENOTSUP`) — all
-cloned normally. That fail-safe is why the check is safe to run in a dry-run and on
-every macOS version: it is `fcntl`-only — it never `read()`s, so it will not fault a
-dataless iCloud file down from the cloud — opens read-only, and falls back to "clone
-normally" on any error.
+"Unknown" — map nothing, clone normally — covers an empty file and any extent the kernel
+will not map: a transparently compressed (decmpfs) file whose bytes live in an xattr
+rather than the data fork (`ENOTSUP`), a SIP-protected file, `ERANGE`, etc. That
+fail-safe is why the check is safe to run in a dry-run and on every macOS version: it is
+`fcntl`-only — it never `read()`s, so it will not fault a dataless iCloud file down from
+the cloud — opens read-only, and falls back to "clone normally" on any error.
 
 The space the recognized clones represent is reported on its own line —
 `already saved by earlier clones: <allocated> allocated (<logical> logical) across <n> files`

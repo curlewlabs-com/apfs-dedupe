@@ -427,10 +427,12 @@ esac
 # A sparse duplicate can have a large logical size while holding no allocated
 # blocks. Counting only st_size would make the primary reclaim figure look like
 # disk space that never existed, so the summary must lead with allocated bytes
-# and keep the fclones/logical byte count as secondary context.
+# and keep the fclones/logical byte count as secondary context. The canonical is
+# dense so the all-hole duplicate's map differs from it -- a would-clone, not the
+# identical-map already-shared case the next test covers.
 d="$WORK/sparse"; mkdir "$d"
-dd if=/dev/zero of="$d/canon" bs=1 count=0 seek=1048576 2>/dev/null
-cp "$d/canon" "$d/dup"
+head -c 1048576 /dev/urandom > "$d/canon"                            # dense 1 MiB canonical
+dd if=/dev/zero of="$d/dup" bs=1 count=0 seek=1048576 2>/dev/null    # all-hole dup: 1 MiB logical, 0 blocks
 dry=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" 2>/dev/null)
 case "$dry" in
     *"would reclaim: 0.0 B allocated (1.0 MiB logical) across 1 files"*) pass "accounting: sparse duplicate reports allocated bytes before logical bytes" ;;
@@ -438,13 +440,13 @@ case "$dry" in
 esac
 
 # ---- a partially-shared file is never trusted as already-shared
-# (regression guard for the partial-share false-positive). A clone whose later range is
-# CoW-broken by an identical-bytes rewrite shares its FIRST extent but has
-# private later extents, yet stays byte-identical -- so fclones still groups it.
-# Trusting a first-extent match would skip it forever and over-report its full
-# size as saved. The engine trusts only a file stored as a SINGLE whole-file
-# extent, so a multi-extent (partially shared) file reads as "unknown" (None)
-# and is cloned normally. ----
+# (regression guard for the partial-share false-positive). A clone whose later
+# range is CoW-broken by an identical-bytes rewrite shares its FIRST extent but
+# has a private rewritten extent, yet stays byte-identical -- so fclones still
+# groups it. Trusting that would skip it forever and over-report its full size as
+# saved. The engine compares the FULL extent map, so the diverged extent makes
+# `multi`'s map differ from the original's: a mismatch it clones (re-sharing the
+# broken range), never a trusted already-shared. ----
 d="$WORK/partialshare"; mkdir "$d"
 head -c 1048576 /dev/urandom > "$d/single"        # one contiguous extent
 cp -c "$d/single" "$d/multi"                       # full clone, then...
@@ -463,19 +465,66 @@ fi
 rc=0
 PYTHONPATH="$HERE/../lib" python3 - "$d/single" "$d/multi" <<'PY' || rc=$?
 import apply, os, sys
-single = apply._sole_extent_of(sys.argv[1])   # one contiguous extent -> (st_dev, devoffset, length)
-multi = apply._sole_extent_of(sys.argv[2])    # partially CoW-broken -> must be None
-# multi-extent reads as None; the sole-extent identity leads with
-# the device id, so a device offset -- meaningful only within its
-# device -- cannot be mistaken for sharing across volumes.
-ok = single is not None and multi is None and single[0] == os.stat(sys.argv[1]).st_dev
+single = apply._extent_map_of(sys.argv[1])   # one contiguous extent
+multi = apply._extent_map_of(sys.argv[2])    # partially CoW-broken -> a DIFFERENT map
+# A multi-extent file now maps cleanly (no longer "unknown"), but the diverged
+# extent gives `multi` a different map than `single`, so the engine sees a
+# mismatch and clones it rather than trusting it as already-shared. The identity
+# leads with the device id, so an offset -- meaningful only within its device --
+# cannot be mistaken for sharing across volumes.
+ok = (single is not None and multi is not None and multi != single
+      and single[0] == os.stat(sys.argv[1]).st_dev)
 sys.exit(0 if ok else 5)
 PY
 if [ "$rc" -eq 0 ]; then
-    pass "partial-share: only a same-device sole extent is trusted (multi-extent -> unknown; identity carries device)"
+    pass "partial-share: a partially CoW-broken clone has a divergent map (mismatch -> cloned, not trusted)"
 else
-    fail "partial-share: a multi-extent or device-blind match could over-report/skip"
+    fail "partial-share: partial clone wrongly matched or device-blind (could over-report/skip)"
 fi
+
+# ---- a genuinely multi-extent clone (fragmented/sparse) IS recognized as
+# already-shared, so a re-run leaves it alone instead of re-cloning it and
+# re-counting its size as reclaimed. Regression guard for the multi-extent blind
+# spot: before the full-extent-map check the engine trusted only a single
+# whole-file extent, so every large (multi-extent) file -- and any sparse file --
+# was re-cloned every run and re-counted. F_PUNCHHOLE forces a deterministic
+# multi-extent layout (data | hole | data); `cp -c` clones it, and clonefile
+# reproduces the whole map, hole included, so the clone's map equals the
+# canonical's and the engine must report it as already-saved, reclaiming nothing.
+d="$WORK/multiextent"; mkdir "$d"
+python3 - "$d/canon" <<'PY'
+import fcntl, os, struct, sys
+F_PUNCHHOLE = 99
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
+os.write(fd, b"\xab" * (16 * 1024 * 1024))
+# struct fpunchhole { uint32 fp_flags; uint32 reserved; off_t offset; off_t length };
+# offset and length are block-aligned, leaving data | 8 MiB hole | data.
+fcntl.fcntl(fd, F_PUNCHHOLE, struct.pack("=IIqq", 0, 0, 4 * 1024 * 1024, 8 * 1024 * 1024))
+os.fsync(fd); os.close(fd)
+PY
+cp -c "$d/canon" "$d/dup"                          # clonefile: dup shares canon's full map, hole included
+# Premise: canon really is multi-extent and the clone's map matches it -- a
+# single-extent file would have passed the old check too and proven nothing.
+rc=0
+PYTHONPATH="$HERE/../lib" python3 - "$d/canon" "$d/dup" <<'PY' || rc=$?
+import apply, sys
+canon = apply._extent_map_of(sys.argv[1])
+dup = apply._extent_map_of(sys.argv[2])
+ok = canon is not None and len(canon[1]) > 1 and dup == canon
+sys.exit(0 if ok else 7)
+PY
+assert_eq "multi-extent: premise (canon is multi-extent; clone's map matches)" "$rc" "0"
+ino_before=$(ino "$d/dup")
+out=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply 2>/dev/null)
+assert_eq "multi-extent: re-run leaves the multi-extent clone untouched (inode stable)" "$(ino "$d/dup")" "$ino_before"
+case "$out" in
+    *"already saved by earlier clones: "*" across 1 files"*) pass "multi-extent: a fragmented/sparse clone is recognized as already-shared" ;;
+    *) fail "multi-extent: fragmented/sparse clone NOT recognized -- would be re-cloned and re-counted (got: $out)" ;;
+esac
+case "$out" in
+    *"reclaimed: 0.0 B allocated (0.0 B logical) across 0 files"*) pass "multi-extent: re-run reclaims nothing new (no double-count)" ;;
+    *) fail "multi-extent: re-run re-counted the clone as reclaimed (got: $out)" ;;
+esac
 
 # ---- cloud-backed roots are excluded from the scan by default, so a
 # broad run never reads -- and re-downloads -- evicted iCloud Drive / File
