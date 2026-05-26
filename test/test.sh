@@ -402,11 +402,12 @@ else
     fail "excludes: glob was expanded against the cwd (argv: $(tr '\n' '|' < "$d/argv" 2>/dev/null))"
 fi
 
-# ---- the plan/actions go to STDOUT, not stderr (so '> file' keeps them) --
-# The per-file report is the dry-run's primary output; it must be on stdout, or a
-# user redirecting with '> plan.txt' loses everything but the summary (progress
-# and warnings stay on stderr). Capture stdout only (2>/dev/null) and assert the
-# plan line is there; apply records each clone on stdout too, for an audit trail.
+# ---- the dry-run plan and the --apply audit trail go to STDOUT (so '> file'
+# keeps them), and per-file --apply lines are opt-in. The dry-run plan is its
+# primary output and is always on stdout. An --apply run prints only the summary
+# by default -- a nightly /Users sweep clones tens of thousands of files and one
+# line each would bury the log -- and restores the per-file `cloned` audit line
+# under --verbose. (progress/warnings stay on stderr, dropped here with 2>/dev/null.)
 d="$WORK/stdout"; mkdir "$d"
 head -c 1048576 /dev/urandom > "$d/canon"; cp "$d/canon" "$d/dup"
 plan=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" 2>/dev/null)
@@ -414,11 +415,22 @@ case "$plan" in
     *"would clone "*"$d/dup"*) pass "dry-run: the plan is on stdout (captured by > file)" ;;
     *) fail "dry-run: plan missing from stdout (got: $plan)" ;;
 esac
+# --apply without --verbose: the per-file `cloned` line is suppressed (the log-
+# volume lever) but the summary still reports the reclaim. "cloned " appears only
+# in the per-file line, never the summary, so its presence here is a leak.
 head -c 1048576 /dev/urandom > "$d/canon2"; cp "$d/canon2" "$d/dup2"
 applied=$(report "$d/canon2" "$d/dup2" | python3 "$ENGINE" --apply 2>/dev/null)
 case "$applied" in
-    *"cloned "*"$d/dup2"*) pass "apply: each clone is recorded on stdout (audit trail)" ;;
-    *) fail "apply: clone not recorded on stdout (got: $applied)" ;;
+    *"cloned "*"$d/dup2"*) fail "apply: per-file clone line leaked without --verbose (got: $applied)" ;;
+    *"reclaimed: "*"across 1 files"*) pass "apply: per-file lines suppressed by default, reclaim summarized" ;;
+    *) fail "apply: default output missing the reclaim summary (got: $applied)" ;;
+esac
+# --apply --verbose restores the per-file `cloned` audit line on stdout.
+head -c 1048576 /dev/urandom > "$d/canon3"; cp "$d/canon3" "$d/dup3"
+verbose_applied=$(report "$d/canon3" "$d/dup3" | python3 "$ENGINE" --apply --verbose 2>/dev/null)
+case "$verbose_applied" in
+    *"cloned "*"$d/dup3"*) pass "apply: --verbose restores the per-file clone audit line on stdout" ;;
+    *) fail "apply: --verbose did not record the clone on stdout (got: $verbose_applied)" ;;
 esac
 
 # ---- the wrapper consumes real fclones JSON and feeds the apply engine ----
@@ -434,6 +446,14 @@ case "$dry" in
         pass "wrapper: real fclones dry-run reports the duplicate pair" ;;
     *) fail "wrapper: real fclones dry-run did not report the duplicate pair (got: $dry)" ;;
 esac
+# The summary leads with the files fclones considered (2: canon + dup) and the
+# scan duration -- the count read by the wrapper from fclones' real scan log, the
+# duration from its own timing. Pins both against the actual fclones output, so a
+# future fclones that rewords that log line is caught here.
+case "$dry" in
+    *"scanned: 2 files in "*) pass "wrapper: summary reports files-scanned and scan duration" ;;
+    *) fail "wrapper: summary missing the scanned/duration line (got: $dry)" ;;
+esac
 a_before=$(ino "$d/canon"); b_before=$(ino "$d/dup")
 applied=$("$SCRIPT" --apply --scope "$d" --min 1 2>/dev/null)
 if cmp -s "$d/canon" "$d/dup" \
@@ -442,6 +462,41 @@ if cmp -s "$d/canon" "$d/dup" \
 else
     fail "wrapper: real fclones apply did not clone a duplicate (got: $applied)"
 fi
+
+# ---- files-scanned is read best-effort from fclones' scan log, so it degrades
+# safely. When the line the wrapper reads the count from is absent (a future
+# fclones reword, a non-English locale), the count is dropped and the summary
+# reports the scan duration alone -- never a wrong number, never a failure. Stub
+# fclones to emit a valid report but NO "matching selection criteria" line. ----
+d="$WORK/scancount"; mkdir -p "$d/bin" "$d/scope"
+cat > "$d/bin/fclones" <<'EOF'
+#!/bin/sh
+echo "fclones: info: a log line that is not the files-considered count" >&2
+printf '{"header":{"stats":{}},"groups":[]}\n'
+EOF
+chmod +x "$d/bin/fclones"
+out=$(PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" 2>/dev/null)
+case "$out" in
+    *"scanned: "*" files in "*) fail "scancount: emitted a files count fclones never reported (got: $out)" ;;
+    *"scan completed in "*) pass "scancount: unparseable files count omitted, scan duration still reported" ;;
+    *) fail "scancount: scan line missing entirely (got: $out)" ;;
+esac
+
+# ---- and when fclones DOES report the count, thousands separators are stripped:
+# a large count prints as "Found 1,234 ... files matching selection criteria", but
+# the summary must show a clean integer. Stub fclones to emit the comma'd line. ----
+d="$WORK/scancomma"; mkdir -p "$d/bin" "$d/scope"
+cat > "$d/bin/fclones" <<'EOF'
+#!/bin/sh
+echo "[2026-05-26 00:00:00.000] fclones:  info: Found 1,234 (5.6 GB) files matching selection criteria" >&2
+printf '{"header":{"stats":{}},"groups":[]}\n'
+EOF
+chmod +x "$d/bin/fclones"
+out=$(PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" 2>/dev/null)
+case "$out" in
+    *"scanned: 1234 files in "*) pass "scancount: thousands separators stripped to a clean integer" ;;
+    *) fail "scancount: comma'd files count not normalized (got: $out)" ;;
+esac
 
 # ---- _human formats sizes at the unit boundaries, incl. the GiB->TiB
 # fall-through (>= 1024 GiB must stay labelled TiB -- the last unit -- not fall
@@ -462,6 +517,24 @@ if [ "$rc" -eq 0 ]; then
     pass "format: _human unit boundaries and the GiB->TiB fall-through"
 else
     fail "format: _human boundary formatting is wrong"
+fi
+
+# ---- _human_duration formats the scan time for the summary: bare seconds under
+# a minute, then Mm SSs, then Hh MMm. Pure formatting (deterministic, no clock),
+# checked by direct import like _human above -- the minute/hour rollovers are the
+# boundaries worth pinning. ----
+rc=0
+PYTHONPATH="$HERE/../lib" python3 - <<'PY' || rc=$?
+import apply, sys
+cases = {0: "0s", 5: "5s", 59: "59s", 60: "1m00s", 61: "1m01s",
+         599: "9m59s", 3599: "59m59s", 3600: "1h00m", 3661: "1h01m"}
+bad = [s for s, want in cases.items() if apply._human_duration(s) != want]
+sys.exit(0 if not bad else 8)
+PY
+if [ "$rc" -eq 0 ]; then
+    pass "format: _human_duration seconds/minutes/hours boundaries"
+else
+    fail "format: _human_duration boundary formatting is wrong"
 fi
 
 # ---- a duplicate already cloned on an earlier run is detected via its

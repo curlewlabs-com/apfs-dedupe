@@ -62,8 +62,9 @@ Usage: apfs-dedupe.sh [options]
                    only Full Disk Access does, which a scheduled daemon cannot
                    get, so reaching Desktop/Documents/Downloads means running
                    interactively from a terminal that has it.
-  --verbose        list every skipped file (default: skips are summarized by
-                   reason in the run summary, not printed one per line)
+  --verbose        print a line per cloned file (in --apply) and per skipped file;
+                   default: an --apply run prints just the summary and skips are
+                   summarized by reason (a dry-run always prints its full plan)
   -h, --help       show this help
 
 Each duplicate is replaced by a copy-on-write clone of the first file in its
@@ -72,16 +73,18 @@ group: independent inode, shared storage, diverge-on-write. All metadata
 modified (immutable, locked by ACL, permission denied) are skipped, never
 forced.
 
-Output: the per-file plan (dry-run) / actions (apply) and the savings summary
-go to STDOUT; progress, and one note for any folders that could not be read
-(privacy protection / permissions) with Full Disk Access advice, go to STDERR.
-Files examined but left untouched are summarized by reason at the end of the
-summary on STDOUT; --verbose adds the raw fclones diagnostics and a per-file skip
-line on STDERR. Reclaim summaries lead with allocated bytes and show logical
-duplicate bytes in parentheses, so you can save just the plan with a redirect and
-still watch progress on screen:
-  ./apfs-dedupe.sh > plan.txt        # plan + summary in the file
-  ./apfs-dedupe.sh > plan.txt 2>&1    # everything, including --verbose skips
+Output: the dry-run plan and the savings summary go to STDOUT; progress, and one
+note for any folders that could not be read (privacy protection / permissions)
+with Full Disk Access advice, go to STDERR. The summary leads with the files
+scanned and how long the scan took, then the reclaim (allocated bytes first,
+logical duplicate bytes in parentheses); files examined but left untouched are
+summarized by reason. An --apply run prints just that summary by default -- the
+per-file `cloned` lines are opt-in under --verbose, since a nightly /Users sweep
+clones tens of thousands of files and one line each would bury the log. --verbose
+also adds the raw fclones diagnostics and a per-file skip line on STDERR. Save
+just the plan with a redirect and still watch progress on screen:
+  ./apfs-dedupe.sh > plan.txt                       # dry-run plan + summary in the file
+  ./apfs-dedupe.sh --apply --verbose > clones.txt    # full per-file apply record
 EOF
 }
 
@@ -253,8 +256,10 @@ echo "Scanning $SCOPE (files >= $MIN) with fclones..." >&2
 # note carrying the same Full Disk Access advice the engine gives, and pass every
 # other fclones line (its progress/summary, real warnings) straight through.
 rc=0
+scan_start=$(date +%s)
 fclones group --no-ignore --hidden --one-fs --min "$MIN" "$@" \
     --format json "$SCOPE" >"$REPORT" 2>"$FCERR" || rc=$?
+scan_secs=$(( $(date +%s) - scan_start ))
 
 # Match the OS strerror text, not fclones' surrounding wording: the errno string
 # is stable across fclones versions. It is English here because launchd jobs run
@@ -281,6 +286,23 @@ if [ "$rc" -ne 0 ]; then
     exit "$rc"
 fi
 
+# Files fclones actually considered (after the --min filter), read best-effort
+# from its scan log to put a scan-size figure in the run summary. This is the one
+# place the wrapper reads fclones' wording rather than a stable errno string
+# (contrast the denial fold above, where matching the wrong text would hide real
+# denials): it is purely informational, so a wording change in a future fclones
+# just drops the count from the summary -- the engine then reports the duration
+# alone -- never a wrong number and never a failure. English-only like the rest
+# (C-locale launchd jobs, overwhelmingly-English interactive shells). Commas in
+# large counts are stripped; anything not left a clean integer is discarded.
+# Anchored on fclones' exact "Found N (SIZE) files matching selection criteria"
+# shape (the count is always followed by the size in parens): a format that does
+# not match drops the count rather than capturing a partial number.
+files_scanned=$(sed -n 's/.*Found \([0-9][0-9,]*\) (.*files matching selection criteria.*/\1/p' "$FCERR" | tail -n1 | tr -d ',')
+case "$files_scanned" in
+    '' | *[!0-9]*) files_scanned="" ;;
+esac
+
 if [ -z "$APPLY" ]; then
     echo >&2
     echo "DRY RUN -- nothing changed. Re-run with --apply to reclaim the space below." >&2
@@ -293,6 +315,8 @@ fi
 set --
 [ -n "$APPLY" ] && set -- "$@" --apply
 [ -n "$VERBOSE" ] && set -- "$@" --verbose
+set -- "$@" --scan-seconds "$scan_secs"
+[ -n "$files_scanned" ] && set -- "$@" --files-scanned "$files_scanned"
 python3 "$APPLY_ENGINE" "$@" <"$REPORT"
 
 # After an --apply, APFS/Time Machine *local* snapshots (taken hourly) are

@@ -264,6 +264,19 @@ README ("Why didn't free space change? Snapshots") for the operator-facing steps
   reason a user can act on: granting Full Disk Access. `--verbose` restores the raw
   `fclones` lines and the engine's per-file skip line (with the full path) on
   stderr for debugging.
+- **An `--apply` run prints a summary, not a line per clone.** A nightly `/Users`
+  sweep can clone tens of thousands of files, and one `cloned …` line each would
+  bury the log. So `--apply` emits only the run summary by default, and `--verbose`
+  restores the per-file `cloned` audit line on stdout. A dry-run is the exception —
+  its per-file plan is the whole deliverable, so it always prints. The summary
+  leads with the files scanned and the scan duration (the wrapper times the
+  `fclones` scan and passes both into the engine via `--scan-seconds` /
+  `--files-scanned`), then duplicates found, space already saved by earlier clones,
+  space reclaimed, and the skip breakdown. The files-scanned count is read
+  best-effort from `fclones`' own scan log and is simply dropped if a future
+  `fclones` rewords that line — informational only, unlike the permission fold
+  above, which matches the stable `strerror` text because getting it wrong would
+  hide real denials.
 - **`--min 1M`, with a `--git` preset that drops to `1`.** APFS allocates ordinary
   file data in 4 KiB blocks and does not inline regular-file data, so cloning any
   ordinary allocated duplicate frees at least one whole block (4 KiB) regardless

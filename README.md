@@ -31,9 +31,10 @@ fclones: Found 3 (7.3 MB) redundant files
 
 DRY RUN -- nothing changed. Re-run with --apply to reclaim the space below.
 
-would clone /Users/you/Projects/webapp/node_modules/ui-kit/bundle.js -> /Users/you/Projects/webapp-backup/node_modules/ui-kit/bundle.js  (4.0 MiB allocated)
-would clone /Users/you/Projects/webapp/assets.tar -> /Users/you/Projects/webapp-backup/assets.tar  (2.0 MiB allocated)
-would clone /Users/you/Projects/webapp/icon.png -> /Users/you/Projects/webapp-backup/icon.png  (1.0 MiB allocated)
+would clone /Users/you/Projects/webapp/node_modules/ui-kit/bundle.js -> /Users/you/Projects/webapp-backup/node_modules/ui-kit/bundle.js  (4.0 MiB allocated (4.0 MiB logical))
+would clone /Users/you/Projects/webapp/assets.tar -> /Users/you/Projects/webapp-backup/assets.tar  (2.0 MiB allocated (2.0 MiB logical))
+would clone /Users/you/Projects/webapp/icon.png -> /Users/you/Projects/webapp-backup/icon.png  (1.0 MiB allocated (1.0 MiB logical))
+scanned: 412 files in 2s
 would reclaim: 7.0 MiB allocated (7.0 MiB logical) across 3 files
 ```
 
@@ -177,26 +178,31 @@ apfs-dedupe.sh [--apply] [--scope PATH] [--min SIZE] [--exclude GLOB] [--verbose
   only thing to grant would be the system shell — Full Disk Access for *every*
   shell script, which this tool won't recommend; the daemon therefore stays out of
   those folders, and a periodic interactive run covers them.
-- `--verbose` — list every skipped file individually. By default skips are
-  summarized by reason (see [Output](#output)); `--verbose` adds a per-file line on
-  stderr and surfaces the raw `fclones` diagnostics for the folders it couldn't read.
+- `--verbose` — print a line per cloned file (in `--apply`) and per skipped file.
+  By default an `--apply` run prints just the summary and skips are summarized by
+  reason (see [Output](#output)); `--verbose` restores the per-file `cloned` line on
+  stdout, adds a per-file skip line on stderr, and surfaces the raw `fclones`
+  diagnostics for the folders it couldn't read. A dry-run always prints its full plan.
 
 ### Output
 
-The per-file plan (dry-run) or actions (apply) **and** the savings summary go to
-**stdout**; progress (`Scanning…`, fclones's own logs) goes to **stderr**. Files
-left untouched are **summarized by reason** at the end of the summary, not streamed
-one per line — and folders an un-granted run couldn't read are folded into a single
-counted note on stderr with Full Disk Access advice, rather than one line each.
-Reclaim summaries lead with estimated allocated bytes and show logical duplicate
-bytes in parentheses, because sparse or compressed files can occupy fewer blocks
-than their logical size. So a plain redirect saves just the report while progress
-still shows on screen:
+The dry-run plan **and** the savings summary go to **stdout**; progress
+(`Scanning…`, fclones's own logs) goes to **stderr**. The summary leads with the
+files scanned and how long the scan took, then the reclaim; files left untouched
+are **summarized by reason** at the end, not streamed one per line — and folders an
+un-granted run couldn't read are folded into a single counted note on stderr with
+Full Disk Access advice, rather than one line each. An `--apply` run prints just
+that summary by default — the per-file `cloned` lines are **opt-in** under
+`--verbose`, since a nightly `/Users` sweep can clone tens of thousands of files
+and one line each would bury the log. Reclaim figures lead with estimated allocated
+bytes and show logical duplicate bytes in parentheses, because sparse or compressed
+files can occupy fewer blocks than their logical size. So a plain redirect saves
+just the report while progress still shows on screen:
 
 ```sh
-./apfs-dedupe.sh > plan.txt          # plan + summary saved; progress on screen
-./apfs-dedupe.sh > plan.txt 2>&1      # everything, warnings included
-./apfs-dedupe.sh --verbose ...        # list every skipped file (else summarized)
+./apfs-dedupe.sh > plan.txt                      # dry-run plan + summary saved; progress on screen
+./apfs-dedupe.sh --apply --verbose > clones.txt   # full per-file apply record on disk
+./apfs-dedupe.sh --verbose ...                    # also list every skipped file (else summarized)
 ```
 
 ## Why didn't free space change? Snapshots

@@ -67,7 +67,9 @@ Basename = NewType("Basename", str)
 
 # Output sinks (see dedupe_group/main): log -> stderr (progress, and per-file skip
 # lines only under --verbose -- otherwise skips are summarized by reason, see
-# _Skips), emit -> stdout (the report a user redirects to a file).
+# _Skips). emit -> stdout (the report a user redirects to a file): the dry-run
+# plan always, and in --apply a per-file `cloned` line only under --verbose
+# (otherwise just the run summary).
 Log = Callable[[str], None]
 Emit = Callable[[str], None]
 
@@ -185,6 +187,19 @@ def _human(n: int) -> str:
             return f"{f:.1f} {unit}"
         f /= 1024.0
     return f"{f:.1f} TiB"
+
+
+def _human_duration(seconds: int) -> str:
+    """A scan duration for the run summary: bare seconds under a minute, then
+    Mm SSs, then Hh MMm. Whole seconds is all the wrapper's `date +%s` scan
+    timing resolves -- plenty for a sweep measured in minutes."""
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m{secs:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m"
 
 
 def _same_content_fd(fa: int, fb: int, bufsize: int = 1 << 20) -> bool:
@@ -423,15 +438,18 @@ def _space_detail(logical: int, allocated: int) -> str:
     return f"{_human(allocated)} allocated ({_human(logical)} logical)"
 
 
-def dedupe_group(files: list[FullPath], apply: bool,
+def dedupe_group(files: list[FullPath], apply: bool, verbose: bool,
                  skips: _Skips, emit: Emit) -> _GroupResult:
     """Clone files[1:] from files[0]. Returns a _GroupResult.
 
-    Two output channels: emit() carries the report a user wants to keep -- the
-    per-file plan (dry-run) or the per-file actions (apply) -- and goes to
-    stdout, so `> plan.txt` captures it. Skips are tallied by reason on `skips`
-    for the run summary; the per-file skip line goes to stderr only under
-    --verbose (see _Skips).
+    Two output channels: emit() carries the report a user keeps and goes to
+    stdout, so `> plan.txt` captures it. In a dry-run that is the per-file plan,
+    always emitted -- it is the whole deliverable. In --apply it is a per-file
+    `cloned` line emitted only under --verbose: on a broad nightly apply those
+    lines are the bulk of the log (one per cloned file) while the run summary
+    already reports the totals, so they are opt-in. Skips are tallied by reason on
+    `skips` for the run summary; the per-file skip line likewise goes to stderr
+    only under --verbose (see _Skips).
 
     A duplicate with the same full extent map as the canonical, on the same
     device, was cloned on an earlier run; it is counted in already_shared (and
@@ -533,7 +551,8 @@ def dedupe_group(files: list[FullPath], apply: bool,
             continue
         try:
             if _clone_over(canonical, dirfd, dup, skips):
-                emit(f"cloned {canonical} -> {dup}  ({space})")
+                if verbose:
+                    emit(f"cloned {canonical} -> {dup}  ({space})")
                 cloned += 1
                 reclaimed_logical += dst.st_size
                 reclaimed_allocated += _allocated_bytes(dst)
@@ -582,7 +601,15 @@ def main() -> int:
     p.add_argument("--apply", action="store_true",
                    help="actually clone duplicates (default: dry-run, changes nothing)")
     p.add_argument("--verbose", action="store_true",
-                   help="list every skipped file (default: skips are summarized by reason)")
+                   help="print a line per cloned file (in --apply) and per skipped file "
+                        "(default: an --apply run prints just the summary; a dry-run always "
+                        "prints its full plan)")
+    # Scan stats supplied by the wrapper, which is what runs fclones: it times the
+    # scan and reads the files-considered count from fclones' log. Optional and
+    # hidden -- they are a wrapper->engine seam, not for direct use; run on
+    # hand-built JSON without them and the summary just omits the scan line.
+    p.add_argument("--scan-seconds", type=int, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--files-scanned", type=int, default=None, help=argparse.SUPPRESS)
     args = p.parse_args()
 
     # Authoritative apply-mode safety gate: the engine -- not just the shell
@@ -604,8 +631,9 @@ def main() -> int:
     groups = cast("list[_FclonesGroup]", report.get("groups", []))
     stats = cast("_FclonesStats", report.get("header", {}).get("stats", {}))
 
-    # Two channels: the report a user keeps (plan/actions + summary) -> stdout,
-    # so `> plan.txt` captures it; progress and per-file skip lines -> stderr.
+    # Two channels: the report a user keeps -> stdout, so `> plan.txt` captures it
+    # (the dry-run plan and the summary always; per-file `cloned` lines in --apply
+    # only under --verbose); progress and per-file skip lines -> stderr.
     def log(msg: str) -> None:
         print(msg, file=sys.stderr)
 
@@ -627,13 +655,22 @@ def main() -> int:
         files = g.get("files", [])
         if len(files) < 2:
             continue
-        gr = dedupe_group(files, apply=args.apply, skips=skips, emit=emit)
+        gr = dedupe_group(files, apply=args.apply, verbose=args.verbose, skips=skips, emit=emit)
         total_cloned += gr.cloned
         total_reclaimed_logical += gr.reclaimed_logical
         total_reclaimed_allocated += gr.reclaimed_allocated
         total_already_shared += gr.already_shared
         total_already_shared_logical += gr.already_shared_logical
         total_already_shared_allocated += gr.already_shared_allocated
+
+    # Lead with the scan stats the wrapper supplied (files it considered, how long
+    # the scan took). Omitted when the engine is run directly on hand-built JSON;
+    # the duration can stand alone if the files count could not be read.
+    if args.scan_seconds is not None:
+        if args.files_scanned is not None:
+            print(f"scanned: {args.files_scanned} files in {_human_duration(args.scan_seconds)}")
+        else:
+            print(f"scan completed in {_human_duration(args.scan_seconds)}")
 
     found = stats.get("redundant_file_size")
     if found is not None:
