@@ -93,16 +93,21 @@ AT_FDCWD = -2
 O_NOFOLLOW_ANY = 0x20000000
 # fcntl(2) op (from <sys/fcntl.h>): F_LOG2PHYS_EXT maps a file offset+length to
 # the physical device offset and contiguous run length of the extent backing it.
-# Two files on the same device, each stored as a single extent at the same
-# offset, share all their storage (a prior clone) -- a physical block belongs to
-# one allocation, so an equal offset is proof of sharing, never a coincidence (a
-# device offset is meaningful only within its device, so _sole_extent carries the
-# device id alongside it). struct log2phys is
-# 4-byte *packed* (legacy 32-bit ABI): flags@0, contigbytes@4, devoffset@12 --
+# Walking it from byte 0 to EOF yields the file's full extent map; two files on
+# the same device with identical maps share all their storage (a prior clone) --
+# a physical block belongs to one allocation, so equal device offsets are proof
+# of sharing, never coincidence (an offset is meaningful only within its device,
+# so _extent_map carries the device id alongside the segments). struct log2phys
+# is 4-byte *packed* (legacy 32-bit ABI): flags@0, contigbytes@4, devoffset@12 --
 # 20 bytes ("=Iqq"); the naturally aligned "Iqq" is 24 bytes and misreads
-# devoffset, returning ERANGE. See _sole_extent.
+# devoffset, returning ERANGE. See _extent_map.
 F_LOG2PHYS_EXT = 65
 _LOG2PHYS_FMT = "=Iqq"
+# F_LOG2PHYS_EXT reports a hole (an unallocated range) with a negative device
+# offset; normalize every hole to this sentinel so equal-length holes compare
+# equal regardless of the exact negative value returned. A real data extent's
+# device offset is a large non-negative number, never this.
+_HOLE = -1
 # stat(2) st_flags bit (from <sys/stat.h>): the file is a "dataless" placeholder
 # -- a cloud-backed file (iCloud Drive, a File Provider) whose contents have been
 # evicted to reclaim space. It reports its full logical size but holds no local
@@ -196,56 +201,67 @@ def _same_content_fd(fa: int, fb: int, bufsize: int = 1 << 20) -> bool:
             return True
 
 
-def _sole_extent(fd: int) -> Optional[tuple[int, int, int]]:
-    """(device id, physical device offset, length) of the file's storage IFF the
-    whole file is a single contiguous extent; None otherwise.
+def _extent_map(fd: int) -> Optional[tuple[int, tuple[tuple[int, int], ...]]]:
+    """(device id, full extent map) of the file's storage, or None if the layout
+    cannot be determined. The map is the ordered tuple of (device_offset, run)
+    segments backing the file from byte 0 to EOF, a hole written as (_HOLE, run)
+    since it holds no blocks.
 
-    Returning a value only for a *sole, whole-file* extent is what lets an equal
-    result between two files prove they share ALL their storage -- not merely
-    byte 0. A physical block belongs to exactly one allocation, so an equal
-    device offset spanning the whole file is sharing, never coincidence. The
-    weaker "first extents match" is NOT sufficient: a clone whose later range was
-    CoW-broken by an identical-bytes rewrite still shares byte 0 and stays
-    byte-identical (so fclones groups it), yet its later extents are private --
-    skipping it would reclaim nothing forever and over-count its full size as
-    saved. Such a file has more than one extent, so its first run is shorter than
-    its size and this returns None; it is then treated as not-provably-shared and
-    cloned normally. (A fully-cloned but fragmented file is likewise re-cloned --
-    a harmless missed optimization, the pre-existing behavior.)
+    Two files share ALL their storage IFF they are on the same device and their
+    maps are equal: a physical block belongs to exactly one allocation, so an
+    equal device offset for every data extent proves the two reference the same
+    blocks (a clone), never a coincidence, and equal holes line up the gaps. This
+    generalizes the earlier single-whole-file-extent check -- a fragmented or
+    sparse clone is recognized too, so a re-run leaves it alone instead of
+    re-cloning it and re-counting its size as reclaimed. The proof stays
+    one-directional: any difference, or any segment we cannot map, falls back to
+    cloning -- the check only ever fails to prove sharing, never asserts sharing
+    that isn't there. A clone whose later range was CoW-broken by an
+    identical-bytes rewrite (still byte-identical, so fclones groups it) has a
+    diverged extent at a different device offset, so its map differs and it is
+    cloned, re-sharing the broken range.
 
-    The device id leads the tuple because a device offset is meaningful only
+    The device id leads the result because a device offset is meaningful only
     within its device: two independent files on different volumes can share an
-    offset+length by coincidence, so only an equal device makes the offset proof
-    of sharing. The wrapper's `--one-fs` already keeps each group on one volume,
-    but the engine runs on arbitrary fclones JSON, so the identity carries the
-    device rather than assuming it.
+    offset by coincidence, so only an equal device makes equal offsets proof. The
+    wrapper's `--one-fs` already keeps each group on one volume, but the engine
+    runs on arbitrary fclones JSON, so the identity carries the device rather than
+    assuming it.
 
-    None also covers an empty file, a leading hole, and a transparently
-    compressed (decmpfs) file whose bytes live in an xattr, not the data fork
-    (ENOTSUP). fcntl-only: it maps extents and never read()s, so it will not
-    fault a dataless iCloud file down from the cloud (that download hazard, on
-    the clone/verify path)."""
+    None (clone normally) covers an empty file and any extent the kernel will not
+    map: a transparently compressed (decmpfs) file whose bytes live in an xattr,
+    not the data fork (ENOTSUP), a SIP-protected file, ERANGE, etc. fcntl-only: it
+    maps extents and never read()s, so it will not fault a dataless iCloud file
+    down from the cloud (that download hazard is on the clone/verify path)."""
     st = os.fstat(fd)
     if st.st_size == 0:
         return None
-    # IN: contigbytes = bytes to map; devoffset = the file offset to map from (0).
-    buf = struct.pack(_LOG2PHYS_FMT, 0, st.st_size, 0)
-    try:
-        res = fcntl.fcntl(fd, F_LOG2PHYS_EXT, buf)
-    except OSError:
-        return None   # ENOTSUP (compressed / SIP-protected), ERANGE, ... -> unknown
-    # OUT: contigbytes = contiguous run length; devoffset = physical device offset.
-    _flags, run, devoff = struct.unpack(_LOG2PHYS_FMT, res)
-    # devoffset -1 == a hole at byte 0; run < size == a second extent follows
-    # (fragmented or partially CoW-broken), so this is not a sole extent.
-    if devoff < 0 or run < st.st_size:
+    segments: list[tuple[int, int]] = []
+    offset = 0
+    while offset < st.st_size:
+        # IN: contigbytes = bytes left to map; devoffset = the file offset to map
+        # from. OUT: contigbytes = the contiguous run at that offset; devoffset =
+        # its physical device offset, negative for a hole.
+        buf = struct.pack(_LOG2PHYS_FMT, 0, st.st_size - offset, offset)
+        try:
+            res = fcntl.fcntl(fd, F_LOG2PHYS_EXT, buf)
+        except OSError:
+            return None   # ENOTSUP (compressed / SIP-protected), ERANGE, ... -> unknown
+        _flags, run, devoff = struct.unpack(_LOG2PHYS_FMT, res)
+        if run <= 0:
+            return None   # no forward progress -> the map cannot be trusted
+        segments.append((_HOLE if devoff < 0 else devoff, run))
+        offset += run
+    # The walk must land exactly on EOF; a run that overshot means the mapping
+    # disagrees with the size we stat'd, so the map cannot be trusted.
+    if offset != st.st_size:
         return None
-    return (st.st_dev, devoff, run)
+    return (st.st_dev, tuple(segments))
 
 
-def _sole_extent_of(path: FullPath) -> Optional[tuple[int, int, int]]:
-    """_sole_extent for a path: open it read-only -- refusing a final-component
-    symlink -- and probe, returning None on any open failure (gone, no
+def _extent_map_of(path: FullPath) -> Optional[tuple[int, tuple[tuple[int, int], ...]]]:
+    """_extent_map for a path: open it read-only -- refusing a final-component
+    symlink -- and map it, returning None on any open failure (gone, no
     permission, a symlink raced in after the lstat). O_NOFOLLOW (not
     O_NOFOLLOW_ANY) keeps this probe working on every macOS version, as the
     dry-run must: it is read-only and fails safe to "clone normally", so it does
@@ -255,7 +271,7 @@ def _sole_extent_of(path: FullPath) -> Optional[tuple[int, int, int]]:
     except OSError:
         return None
     try:
-        return _sole_extent(fd)
+        return _extent_map(fd)
     finally:
         os.close(fd)
 
@@ -360,12 +376,12 @@ def dedupe_group(files: list[FullPath], apply: bool,
     stdout, so `> plan.txt` captures it. log() carries progress and per-file
     skip warnings and goes to stderr.
 
-    A duplicate stored as the same single whole-file extent as the canonical was
-    cloned on an earlier run; it is counted in already_shared (and its size in
-    already_shared_bytes) and left untouched -- in apply and dry-run alike, so a
-    re-run reclaims nothing new and the dry-run projection of an already-deduped
-    tree shows ~0 reclaimable -- instead of pointlessly rebuilding the same
-    sharing and churning the inode."""
+    A duplicate with the same full extent map as the canonical, on the same
+    device, was cloned on an earlier run; it is counted in already_shared (and
+    its size in already_shared_bytes) and left untouched -- in apply and dry-run
+    alike, so a re-run reclaims nothing new and the dry-run projection of an
+    already-deduped tree shows ~0 reclaimable -- instead of pointlessly rebuilding
+    the same sharing and churning the inode."""
     canonical = files[0]
     try:
         cst = os.lstat(canonical)
@@ -382,12 +398,12 @@ def dedupe_group(files: list[FullPath], apply: bool,
         _skip(log, canonical, "dataless (cloud-evicted); skipping group to avoid forcing a download")
         return _GroupResult(0, 0, 0, 0, 0, 0)
 
-    # The canonical's storage as a single whole-file extent, computed once (None
-    # if it is fragmented, compressed, empty, or unreadable -- which disables the
-    # check, cloning every duplicate exactly as before). A duplicate stored as
-    # the same sole extent is already a full clone; see _sole_extent for why only
-    # a sole extent proves whole-file sharing, not merely a shared byte 0.
-    canonical_ext = _sole_extent_of(canonical)
+    # The canonical's full extent map, computed once (None if it is compressed,
+    # empty, or otherwise unmappable -- which disables the check, cloning every
+    # duplicate as before). A duplicate with the same map on the same device is
+    # already a full clone; see _extent_map for why an equal map proves whole-file
+    # sharing, fragmented and sparse files included.
+    canonical_map = _extent_map_of(canonical)
 
     cloned = 0
     reclaimed_logical = 0
@@ -424,12 +440,13 @@ def dedupe_group(files: list[FullPath], apply: bool,
             _skip(log, dup, f"hard-linked ({dst.st_nlink} links); cloning would "
                   f"break the link and reclaim nothing")
             continue
-        # Already cloned on an earlier run? Stored as the same sole whole-file
-        # extent means dup and canonical share ALL their storage, so re-cloning
+        # Already cloned on an earlier run? The same full extent map on the same
+        # device means dup and canonical share ALL their storage, so re-cloning
         # would only churn the inode and reclaim nothing. Count it as
         # already-saved and skip -- in dry-run too, so the projection matches a
-        # real re-run.
-        if canonical_ext is not None and _sole_extent_of(dup) == canonical_ext:
+        # real re-run. A partially CoW-broken clone has a divergent extent, so its
+        # map differs and it is cloned normally.
+        if canonical_map is not None and _extent_map_of(dup) == canonical_map:
             already_shared += 1
             already_shared_logical += dst.st_size
             already_shared_allocated += _allocated_bytes(dst)
