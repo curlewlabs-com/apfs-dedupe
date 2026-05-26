@@ -69,9 +69,11 @@ d="$WORK/locked"; mkdir "$d"
 head -c 1048576 /dev/urandom > "$d/canon"; cp "$d/canon" "$d/dup"
 chflags uchg "$d/dup"
 ino_before=$(ino "$d/dup")
-# Capture stderr (the warnings), discard stdout (the summary): 2>&1 1>/dev/null
-# inside $() points fd2 at the capture pipe, then sends fd1 to /dev/null.
-rc=0; err=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply 2>&1 1>/dev/null) || rc=$?
+# Capture stderr, discard stdout (the summary): 2>&1 1>/dev/null inside $() points
+# fd2 at the capture pipe, then sends fd1 to /dev/null. --verbose makes the
+# per-file skip line (the full-path diagnostic asserted below) reach stderr;
+# without it skips are only counted in the summary.
+rc=0; err=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply --verbose 2>&1 1>/dev/null) || rc=$?
 chflags nouchg "$d/dup"
 if [ "$(ino "$d/dup")" = "$ino_before" ] && [ "$rc" -eq 0 ]; then
     pass "fail-safe: immutable file skipped, clean exit"
@@ -144,7 +146,7 @@ dirfd = os.open(real, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXE
 # symlink to a directory they control.
 os.rename(real, os.path.join(base, "real_moved"))
 os.symlink(os.path.join(base, "attacker"), real)
-ok = apply._clone_over(os.path.join(base, "canon"), dirfd, "dup", lambda m: None)
+ok = apply._clone_over(os.path.join(base, "canon"), dirfd, "dup", apply._Skips(lambda m: None, False))
 os.close(dirfd)
 sys.exit(0 if ok else 4)
 PY
@@ -200,7 +202,7 @@ import apply, os, sys
 base = sys.argv[1]
 dirfd = apply._open_parent_dir(os.path.join(base, "dest", "dup"))
 canonical = os.path.join(base, "realsrc", "link", "canon")   # via realsrc/link -> secret
-ok = apply._clone_over(canonical, dirfd, "dup", lambda m: None)
+ok = apply._clone_over(canonical, dirfd, "dup", apply._Skips(lambda m: None, False))
 os.close(dirfd)
 sys.exit(0 if ok else 3)   # ok=False (skipped) is the safe outcome
 PY
@@ -226,7 +228,7 @@ PYTHONPATH="$HERE/../lib" python3 - "$d" <<'PY' || rc=$?
 import apply, os, sys
 base = sys.argv[1]
 dirfd = apply._open_parent_dir(os.path.join(base, "dest", "dup"))
-ok = apply._clone_over(os.path.join(base, "canon_link"), dirfd, "dup", lambda m: None)
+ok = apply._clone_over(os.path.join(base, "canon_link"), dirfd, "dup", apply._Skips(lambda m: None, False))
 os.close(dirfd)
 sys.exit(0 if ok else 3)
 PY
@@ -282,15 +284,44 @@ case "$out" in
     *"across 0 files"*) pass "hard link: apply reclaim count excludes the hard-linked dup" ;;
     *) fail "hard link: apply counted a hard-linked dup (got: $out)" ;;
 esac
+# Default output summarizes skips by reason on stdout and streams nothing
+# per-file to stderr; --verbose (exercised by the fail-safe case) is what
+# restores the per-file line.
+case "$out" in
+    *"hard-linked elsewhere"*) pass "hard link: skip counted in the summary breakdown" ;;
+    *) fail "hard link: skip not summarized (got: $out)" ;;
+esac
 case "$err" in
-    *hard-linked*) pass "hard link: skip is logged with the reason" ;;
-    *) fail "hard link: skip not logged (got: $err)" ;;
+    *"skip "*) fail "hard link: per-file skip leaked to stderr without --verbose (got: $err)" ;;
+    *) pass "hard link: per-file skip suppressed by default (summarized, not streamed)" ;;
 esac
 # Dry-run must make the same projection, not over-promise reclaimable space.
 dry=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" 2>/dev/null)
 case "$dry" in
     *"across 0 files"*) pass "hard link: dry-run projection also excludes it" ;;
     *) fail "hard link: dry-run over-counted a hard-linked dup (got: $dry)" ;;
+esac
+
+# ---- a permission-denied skip is bucketed as such, and the summary advises
+# granting Full Disk Access -- the one skip reason a user can act on. A directory
+# with no permissions stands in for a TCC-protected folder the run cannot read:
+# the duplicate beneath it must be left untouched and surfaced as a permission
+# skip, not a per-file warning. (Non-root, like the rest of this suite -- root
+# would bypass the mode bits.) ----
+d="$WORK/perm"; mkdir "$d" "$d/locked"
+head -c 1048576 /dev/urandom > "$d/canon"; cp "$d/canon" "$d/locked/dup"
+ino_before=$(ino "$d/locked/dup")
+chmod 000 "$d/locked"            # no search/read -> the engine cannot reach the dup
+out=$(report "$d/canon" "$d/locked/dup" | python3 "$ENGINE" --apply 2>/dev/null)
+chmod 755 "$d/locked"            # restore before asserting (and so cleanup can recurse)
+assert_eq "permission: unreadable duplicate left untouched" "$(ino "$d/locked/dup")" "$ino_before"
+case "$out" in
+    *"unreadable (privacy protection or permissions)"*) pass "permission: skip bucketed as a permission denial" ;;
+    *) fail "permission: skip not bucketed as permission (got: $out)" ;;
+esac
+case "$out" in
+    *"Full Disk Access"*) pass "permission: summary advises granting Full Disk Access" ;;
+    *) fail "permission: summary missing the Full Disk Access advice (got: $out)" ;;
 esac
 
 # ---- --exclude globs reach fclones intact (no word-split, no globbing) --
@@ -650,6 +681,37 @@ if grep -qxF '**/Library/Mail/**' "$d/argv" 2>/dev/null; then
     fail "app-data: --include-app-data should drop the default app-private excludes but did not"
 else
     pass "app-data: --include-app-data opts back into scanning app-private Library data"
+fi
+
+# ---- OS-managed ~/Library data and the Trash are excluded from the scan too --
+# The machine-generated, churning, TCC-protected stores beside the app-private
+# ones (Spotlight index, on-device intelligence, daemon containers) and the Trash
+# (files pending deletion) are never useful dedup targets. --include-app-data
+# re-includes the ~/Library set; the Trash exclude is unconditional. Stub fclones
+# to record argv and assert both. ----
+d="$WORK/osdata"; mkdir -p "$d/bin" "$d/scope"
+cat > "$d/bin/fclones" <<EOF
+#!/bin/sh
+for a in "\$@"; do printf '%s\n' "\$a"; done > "$d/argv"
+printf '{"header":{"stats":{}},"groups":[]}\n'
+EOF
+chmod +x "$d/bin/fclones"
+PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" >/dev/null 2>&1 || true
+if grep -qxF '**/Library/Metadata/CoreSpotlight/**' "$d/argv" 2>/dev/null \
+   && grep -qxF '**/Library/Daemon Containers/**' "$d/argv" 2>/dev/null \
+   && grep -qxF '**/.Trash/**' "$d/argv" 2>/dev/null \
+   && grep -qxF '**/.Trashes/**' "$d/argv" 2>/dev/null; then
+    pass "system-data: OS-managed Library trees and the Trash excluded by default"
+else
+    fail "system-data: default system/Trash excludes missing (argv: $(tr '\n' '|' < "$d/argv" 2>/dev/null))"
+fi
+PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" --include-app-data >/dev/null 2>&1 || true
+if grep -qxF '**/Library/Metadata/CoreSpotlight/**' "$d/argv" 2>/dev/null; then
+    fail "system-data: --include-app-data should drop the OS-managed excludes but did not"
+elif grep -qxF '**/.Trash/**' "$d/argv" 2>/dev/null; then
+    pass "system-data: --include-app-data re-includes Library data but the Trash stays excluded"
+else
+    fail "system-data: Trash exclude should be unconditional but was dropped"
 fi
 
 echo

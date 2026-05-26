@@ -21,6 +21,7 @@ ALLOW_ROOT=""
 INCLUDE_CLOUD=""
 INCLUDE_APP_DATA=""
 GIT_PRESET=""
+VERBOSE=""
 
 usage() {
     cat <<'EOF'
@@ -53,12 +54,16 @@ Usage: apfs-dedupe.sh [options]
                    cloud, so a broad scan can pull down gigabytes -- leave this
                    off unless those roots are fully downloaded locally.
   --include-app-data
-                   also scan app-private Library data (Mail, Messages, Safari,
-                   per-app sandbox Containers) that is excluded by default: it is
-                   TCC-protected, so scanning prompts for access (or is denied),
-                   and it is a poor dedup target. NOTE: this flag does not stop
-                   those prompts -- Full Disk Access does (and is also what lets
-                   the scan reach Desktop/Documents/Downloads, kept in scope).
+                   also scan the protected, machine-managed ~/Library data
+                   excluded by default: app-private stores (Mail, Messages,
+                   Safari, sandbox Containers) plus OS-managed data (Spotlight
+                   index, on-device intelligence, daemon containers) -- all
+                   TCC-protected and poor dedup targets. Does not grant access:
+                   only Full Disk Access does, which a scheduled daemon cannot
+                   get, so reaching Desktop/Documents/Downloads means running
+                   interactively from a terminal that has it.
+  --verbose        list every skipped file (default: skips are summarized by
+                   reason in the run summary, not printed one per line)
   -h, --help       show this help
 
 Each duplicate is replaced by a copy-on-write clone of the first file in its
@@ -68,11 +73,13 @@ modified (immutable, locked by ACL, permission denied) are skipped, never
 forced.
 
 Output: the per-file plan (dry-run) / actions (apply) and the savings summary
-go to STDOUT; progress and skip warnings go to STDERR. Reclaim summaries lead
-with allocated bytes and show logical duplicate bytes in parentheses, so you can
-save just the plan with a redirect and still watch progress on screen:
+go to STDOUT; progress goes to STDERR. Files left untouched are summarized by
+reason at the end of the summary (with advice when a folder could not be read);
+--verbose adds a per-file skip line on STDERR. Reclaim summaries lead with
+allocated bytes and show logical duplicate bytes in parentheses, so you can save
+just the plan with a redirect and still watch progress on screen:
   ./apfs-dedupe.sh > plan.txt        # plan + summary in the file
-  ./apfs-dedupe.sh > plan.txt 2>&1    # everything, including warnings
+  ./apfs-dedupe.sh > plan.txt 2>&1    # everything, including --verbose skips
 EOF
 }
 
@@ -92,6 +99,7 @@ while [ "$argc" -gt 0 ]; do
         --include-cloud) INCLUDE_CLOUD=1; shift ;;
         --include-app-data) INCLUDE_APP_DATA=1; shift ;;
         --git) GIT_PRESET=1; shift ;;
+        --verbose) VERBOSE=1; shift ;;
         --min) MIN="${2:?--min needs a SIZE}"; MIN_SET=1; shift 2; argc=$((argc - 1)) ;;
         --min=*) MIN="${1#--min=}"; MIN_SET=1; shift ;;
         --scope) SCOPE="${2:?--scope needs a PATH}"; shift 2; argc=$((argc - 1)) ;;
@@ -180,24 +188,46 @@ if [ -z "$INCLUDE_CLOUD" ]; then
         --exclude '**/*.photoslibrary/**'
 fi
 
-# App-private Library data -- Mail, Messages, Safari, and the per-app sandbox
-# Containers -- is TCC-protected and a poor dedup target: macOS prompts for (or
-# silently denies, logging "Operation not permitted") access to it, and it is
-# mostly live, churning databases holding little duplicate data and much that is
-# sensitive. Keep it out of the scan by default; --include-app-data opts back in.
-# This only trims the prompt/denial noise from the largest app-private trees --
-# Full Disk Access is what actually stops the prompts, and is also what lets the
-# scan reach the TCC-protected user folders we DO want deduped
-# (Desktop/Documents/Downloads); TCC cannot be granted from a CLI. See
-# docs/architecture.md.
+# Protected, churning, or machine-managed ~/Library data, excluded by default
+# and re-included with --include-app-data. Two classes, same rationale (TCC-
+# protected and a poor dedup target):
+#   - app-private stores -- Mail, Messages, Safari, the per-app sandbox
+#     Containers -- live databases holding little duplicate data and much that
+#     is sensitive;
+#   - OS-managed data -- Spotlight's index, the on-device intelligence/Siri
+#     stores, sandboxed daemon data -- machine-generated and constantly
+#     rewritten, with nothing worth deduping.
+# On the unattended scheduled job macOS silently denies access to these (errno
+# "Operation not permitted"); the engine folds those denials into its counted
+# skip summary. NOTE: --include-app-data does not grant access -- only Full Disk
+# Access does, and a LaunchDaemon (run via /bin/sh) cannot be granted it cleanly,
+# so the way to dedup the TCC-protected user folders (Desktop/Documents/
+# Downloads) is to run apfs-dedupe interactively from a terminal that has Full
+# Disk Access. See docs/architecture.md.
 if [ -z "$INCLUDE_APP_DATA" ]; then
     set -- "$@" \
         --exclude '**/Library/Mail/**' \
         --exclude '**/Library/Messages/**' \
         --exclude '**/Library/Safari/**' \
         --exclude '**/Library/Containers/**' \
-        --exclude '**/Library/Group Containers/**'
+        --exclude '**/Library/Group Containers/**' \
+        --exclude '**/Library/Metadata/CoreSpotlight/**' \
+        --exclude '**/Library/IntelligencePlatform/**' \
+        --exclude '**/Library/Biome/**' \
+        --exclude '**/Library/Trial/**' \
+        --exclude '**/Library/DuetExpertCenter/**' \
+        --exclude '**/Library/DoNotDisturb/**' \
+        --exclude '**/Library/Suggestions/**' \
+        --exclude '**/Library/Daemon Containers/**' \
+        --exclude '**/Library/AppleMediaServices/**'
 fi
+
+# The Trash holds files pending deletion -- cloning them shares storage about to
+# be freed anyway, never a useful target -- and it is TCC-protected too. Excluded
+# unconditionally: there is no case for deduping the Trash, so no opt-in.
+set -- "$@" \
+    --exclude '**/.Trash/**' \
+    --exclude '**/.Trashes/**'
 
 echo "Scanning $SCOPE (files >= $MIN) with fclones..." >&2
 # --no-ignore --hidden: build caches and dotfiles are exactly where the dupes
@@ -216,11 +246,13 @@ if [ -z "$APPLY" ]; then
     echo >&2
 fi
 
-if [ -n "$APPLY" ]; then
-    python3 "$APPLY_ENGINE" --apply <"$REPORT"
-else
-    python3 "$APPLY_ENGINE" <"$REPORT"
-fi
+# Engine flags. The --exclude pass-through args in "$@" were consumed by the
+# fclones call above, so the positional list is free to reuse for the engine's
+# argv -- quoted, so nothing re-splits.
+set --
+[ -n "$APPLY" ] && set -- "$@" --apply
+[ -n "$VERBOSE" ] && set -- "$@" --verbose
+python3 "$APPLY_ENGINE" "$@" <"$REPORT"
 
 # After an --apply, APFS/Time Machine *local* snapshots (taken hourly) are
 # copy-on-write and pin the blocks they captured, so blocks just freed can stay
