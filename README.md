@@ -123,12 +123,14 @@ files can't be modified in any case (they would simply error and be skipped).
   Photos library roots are excluded from the scan by default: reading an evicted
   (dataless) file would fault it back down from the cloud — the opposite of
   reclaiming space. Pass `--include-cloud` to scan them when they are fully local.
-- **Stays out of app-private data.** Mail, Messages, Safari, and per-app sandbox
-  containers under `~/Library` are excluded by default: they are TCC-protected
-  (scanning them makes macOS prompt for access) and a poor dedup target. Pass
-  `--include-app-data` to include them. To stop the prompts for the folders that
-  *are* scanned (Desktop/Documents/Downloads), grant your terminal **Full Disk
-  Access** — see [Usage](#usage).
+- **Stays out of app-private and machine-managed data.** App-private stores (Mail,
+  Messages, Safari, per-app sandbox containers) and OS-managed `~/Library` trees
+  (the Spotlight index, on-device intelligence, daemon containers) are excluded by
+  default — TCC-protected and poor dedup targets; the **Trash** is excluded
+  unconditionally. Pass `--include-app-data` to include the `~/Library` set. The
+  TCC-protected user folders (Desktop/Documents/Downloads) stay in scope but are
+  reachable only with **Full Disk Access** — grant it to your terminal for an
+  interactive run; a scheduled run via `/bin/sh` cannot get it (see [Usage](#usage)).
 
 ## Requirements
 
@@ -141,7 +143,7 @@ Dry-run uses none of that and works on any macOS version.
 ## Usage
 
 ```
-apfs-dedupe.sh [--apply] [--scope PATH] [--min SIZE] [--exclude GLOB]
+apfs-dedupe.sh [--apply] [--scope PATH] [--min SIZE] [--exclude GLOB] [--verbose]
 ```
 
 - `--scope PATH` — narrow the scan if you want (default `/Users`, which covers
@@ -164,27 +166,37 @@ apfs-dedupe.sh [--apply] [--scope PATH] [--min SIZE] [--exclude GLOB]
   `~/Library/CloudStorage`, Photos libraries) that are excluded by default.
   **Warning:** reading an evicted file re-downloads it; only safe when those roots
   are fully downloaded locally.
-- `--include-app-data` — also scan app-private `~/Library` data (Mail, Messages,
-  Safari, per-app sandbox containers) that is excluded by default — TCC-protected
-  and a poor dedup target. This flag does **not** stop the macOS access prompts: to
-  scan the TCC-protected folders that stay in scope (Desktop, Documents, Downloads)
-  without prompting, grant your terminal app **Full Disk Access** in System Settings
-  → Privacy & Security (TCC can't be granted from a CLI). For a scheduled
-  LaunchAgent/LaunchDaemon, grant it to the `fclones` and `python3` binaries
-  instead.
+- `--include-app-data` — also scan the app-private and OS-managed `~/Library` data
+  excluded by default (Mail, Messages, Safari, per-app sandbox containers; the
+  Spotlight index, on-device intelligence and daemon-container stores) — all
+  TCC-protected and poor dedup targets. This flag does **not** grant access: the
+  TCC-protected user folders that stay in scope (Desktop, Documents, Downloads) are
+  reachable only with **Full Disk Access**, which can't be granted from a CLI.
+  Grant it to your terminal app in System Settings → Privacy & Security for an
+  interactive run. A scheduled LaunchAgent/LaunchDaemon runs via `/bin/sh`, so the
+  only thing to grant would be the system shell — Full Disk Access for *every*
+  shell script, which this tool won't recommend; the daemon therefore stays out of
+  those folders, and a periodic interactive run covers them.
+- `--verbose` — list every skipped file individually. By default skips are
+  summarized by reason (see [Output](#output)); `--verbose` adds a per-file line on
+  stderr and surfaces the raw `fclones` diagnostics for the folders it couldn't read.
 
 ### Output
 
 The per-file plan (dry-run) or actions (apply) **and** the savings summary go to
-**stdout**; progress (`Scanning…`, fclones's own logs) and per-file skip warnings
-go to **stderr**. Reclaim summaries lead with estimated allocated bytes and show
-logical duplicate bytes in parentheses, because sparse or compressed files can
-occupy fewer blocks than their logical size. So a plain redirect saves just the
-report while progress still shows on screen:
+**stdout**; progress (`Scanning…`, fclones's own logs) goes to **stderr**. Files
+left untouched are **summarized by reason** at the end of the summary, not streamed
+one per line — and folders an un-granted run couldn't read are folded into a single
+counted note on stderr with Full Disk Access advice, rather than one line each.
+Reclaim summaries lead with estimated allocated bytes and show logical duplicate
+bytes in parentheses, because sparse or compressed files can occupy fewer blocks
+than their logical size. So a plain redirect saves just the report while progress
+still shows on screen:
 
 ```sh
 ./apfs-dedupe.sh > plan.txt          # plan + summary saved; progress on screen
 ./apfs-dedupe.sh > plan.txt 2>&1      # everything, warnings included
+./apfs-dedupe.sh --verbose ...        # list every skipped file (else summarized)
 ```
 
 ## Why didn't free space change? Snapshots
@@ -231,10 +243,12 @@ over your home directory:
 ```
 
 It runs **as you, no root**, with the same safe defaults as the CLI — cloud-backed
-roots and app-private `~/Library` data excluded, and `--git` (`--min 1`) so small
-duplicates are caught too. The first run does the real work; later runs are cheap,
-because already-cloned files are detected and skipped. Output is appended to
-`~/Library/Logs/apfs-dedupe.log`.
+roots, app-private and OS-managed `~/Library` data, and the Trash excluded, and
+`--git` (`--min 1`) so small duplicates are caught too. It runs via `/bin/sh`, so
+it cannot get Full Disk Access and does not reach Desktop/Documents/Downloads — run
+the CLI by hand from a Full-Disk-Access terminal for those. The first run does the
+real work; later runs are cheap, because already-cloned files are detected and
+skipped. Output is appended to `~/Library/Logs/apfs-dedupe.log`.
 
 A LaunchAgent runs only while you're logged in, so if the Mac is asleep at 02:00
 the run happens at the next wake.

@@ -226,10 +226,12 @@ README ("Why didn't free space change? Snapshots") for the operator-facing steps
   `DuetExpertCenter`, `Suggestions`; media-services and Focus state
   `AppleMediaServices`, `DoNotDisturb`; and sandboxed `Daemon Containers`) is
   machine-generated, constantly rewritten, and worth nothing deduped. Scanning either makes macOS prompt on an interactive run
-  or silently deny access (`Operation not permitted`) on the scheduled job; the
-  engine folds those denials into its counted skip summary rather than a per-file
-  warning. The list is best-effort noise reduction for the largest such trees, not
-  exhaustive — a missed one only costs a counted skip, never safety.
+  or deny access (`Operation not permitted`) on the scheduled job; the denial lands
+  at `fclones`' scan (a denied folder never enters the report), so the *wrapper* —
+  not the engine — folds those scan-time denials into one counted note rather than
+  a per-folder warning (see "Skips are summarized by reason" below). The list is
+  best-effort noise reduction for the largest such trees, not exhaustive — a missed
+  one only costs a counted skip, never safety.
 - **Excludes the Trash always.** `~/.Trash` and the volume `.Trashes` hold files
   pending deletion — cloning shares storage about to be freed anyway — and are
   TCC-protected too. There is no case for deduping them, so this exclude has no
@@ -248,12 +250,20 @@ README ("Why didn't free space change? Snapshots") for the operator-facing steps
   dedicated, signed helper binary Full Disk Access would let the daemon reach them
   too, but signing/notarizing one is out of scope; see "Out of scope".)
 - **Skips are summarized by reason, not streamed.** A broad run leaves many files
-  untouched — privacy-protected paths above all — and a per-file warning for each
-  buries the result. The engine classifies each skip at its source (permission,
+  untouched — privacy-protected paths above all — and a per-item warning for each
+  buries the result. Denials occur at two layers, and each is folded into a count.
+  At **scan** time, a folder the run cannot read (a TCC-protected user folder
+  without Full Disk Access) fails in `fclones` at `readdir`, so its files never
+  reach the engine; the wrapper captures `fclones`' stderr and collapses those
+  per-folder permission denials (matched by the OS `strerror` text, stable across
+  `fclones` versions) into one counted note, passing `fclones`' own progress and
+  any non-permission warning straight through. At **apply/examine** time, the
+  engine classifies each skip on a file that *did* enter the report (permission,
   symlinked component, hard-linked, changed-since-scan, cloud-evicted, unreadable)
-  and prints a counted breakdown at the end of the summary, advising on the one a
-  user can act on: granting Full Disk Access. `--verbose` restores the per-file
-  skip line (with the full path) on stderr for debugging.
+  and prints a counted breakdown at the end of the summary. Both advise on the one
+  reason a user can act on: granting Full Disk Access. `--verbose` restores the raw
+  `fclones` lines and the engine's per-file skip line (with the full path) on
+  stderr for debugging.
 - **`--min 1M`, with a `--git` preset that drops to `1`.** APFS allocates ordinary
   file data in 4 KiB blocks and does not inline regular-file data, so cloning any
   ordinary allocated duplicate frees at least one whole block (4 KiB) regardless

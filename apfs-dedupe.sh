@@ -73,11 +73,13 @@ modified (immutable, locked by ACL, permission denied) are skipped, never
 forced.
 
 Output: the per-file plan (dry-run) / actions (apply) and the savings summary
-go to STDOUT; progress goes to STDERR. Files left untouched are summarized by
-reason at the end of the summary (with advice when a folder could not be read);
---verbose adds a per-file skip line on STDERR. Reclaim summaries lead with
-allocated bytes and show logical duplicate bytes in parentheses, so you can save
-just the plan with a redirect and still watch progress on screen:
+go to STDOUT; progress, and one note for any folders that could not be read
+(privacy protection / permissions) with Full Disk Access advice, go to STDERR.
+Files examined but left untouched are summarized by reason at the end of the
+summary on STDOUT; --verbose adds the raw fclones diagnostics and a per-file skip
+line on STDERR. Reclaim summaries lead with allocated bytes and show logical
+duplicate bytes in parentheses, so you can save just the plan with a redirect and
+still watch progress on screen:
   ./apfs-dedupe.sh > plan.txt        # plan + summary in the file
   ./apfs-dedupe.sh > plan.txt 2>&1    # everything, including --verbose skips
 EOF
@@ -171,7 +173,8 @@ HERE=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
 APPLY_ENGINE="$HERE/lib/apply.py"
 
 REPORT=$(mktemp)
-trap 'rm -f "$REPORT"' EXIT INT TERM
+FCERR=$(mktemp)
+trap 'rm -f "$REPORT" "$FCERR"' EXIT INT TERM
 
 # Cloud-backed files (iCloud Drive, third-party File Providers, Photos library
 # originals) can be "dataless" -- evicted to the cloud, holding no local bytes.
@@ -197,13 +200,16 @@ fi
 #   - OS-managed data -- Spotlight's index, the on-device intelligence/Siri
 #     stores, sandboxed daemon data -- machine-generated and constantly
 #     rewritten, with nothing worth deduping.
-# On the unattended scheduled job macOS silently denies access to these (errno
-# "Operation not permitted"); the engine folds those denials into its counted
-# skip summary. NOTE: --include-app-data does not grant access -- only Full Disk
-# Access does, and a LaunchDaemon (run via /bin/sh) cannot be granted it cleanly,
-# so the way to dedup the TCC-protected user folders (Desktop/Documents/
-# Downloads) is to run apfs-dedupe interactively from a terminal that has Full
-# Disk Access. See docs/architecture.md.
+# With --include-app-data on an unattended scheduled job, macOS denies access to
+# these (errno "Operation not permitted"); the denial lands at fclones' scan, so
+# the wrapper folds those scan-time denials into one counted note (see the fclones
+# call below) -- the engine never sees them, since denied paths never enter its
+# JSON.
+# NOTE: --include-app-data does not grant access -- only Full Disk Access does, and
+# a LaunchDaemon (run via /bin/sh) cannot be granted it cleanly, so the way to dedup
+# the TCC-protected user folders (Desktop/Documents/Downloads) is to run
+# apfs-dedupe interactively from a terminal that has Full Disk Access. See
+# docs/architecture.md.
 if [ -z "$INCLUDE_APP_DATA" ]; then
     set -- "$@" \
         --exclude '**/Library/Mail/**' \
@@ -237,8 +243,43 @@ echo "Scanning $SCOPE (files >= $MIN) with fclones..." >&2
 # "$@" holds the --exclude pairs (the cloud-root and app-private defaults above
 # plus any the user passed), quoted so a glob with spaces stays one argument and
 # is not expanded against the cwd.
+#
+# fclones' stderr is captured rather than streamed. A run without Full Disk Access
+# is denied at readdir on every TCC-protected folder it meets (Desktop, Documents,
+# Downloads), and fclones emits one "Failed to read dir ...: Permission denied /
+# Operation not permitted" line per folder. Those paths never enter the JSON, so
+# the engine -- which sees only the report -- cannot summarize them; the wrapper
+# must. Left raw they bury the result, so by default fold them into one counted
+# note carrying the same Full Disk Access advice the engine gives, and pass every
+# other fclones line (its progress/summary, real warnings) straight through.
+rc=0
 fclones group --no-ignore --hidden --one-fs --min "$MIN" "$@" \
-    --format json "$SCOPE" >"$REPORT"
+    --format json "$SCOPE" >"$REPORT" 2>"$FCERR" || rc=$?
+
+# Match the OS strerror text, not fclones' surrounding wording: the errno string
+# is stable across fclones versions. It is English here because launchd jobs run
+# in the C locale and an interactive shell is overwhelmingly English; a non-English
+# interactive run simply falls through to the raw passthrough below, never silence.
+# A non-zero fclones exit is a real failure (bad args, crash), not a denial it
+# recovered from, so replay everything and propagate it rather than hide it behind
+# a summary. --verbose also keeps the raw lines.
+PERM_RE='Permission denied|Operation not permitted'
+if [ "$rc" -ne 0 ] || [ -n "$VERBOSE" ]; then
+    cat "$FCERR" >&2
+else
+    denied=$(grep -cE "$PERM_RE" "$FCERR" 2>/dev/null || true)
+    grep -vE "$PERM_RE" "$FCERR" >&2 || true
+    if [ "${denied:-0}" -gt 0 ]; then
+        echo "note: $denied folder(s) could not be read (privacy protection or permissions) and were skipped." >&2
+        echo "      To include privacy-protected folders (Desktop, Documents, Downloads, ...), run" >&2
+        echo "      apfs-dedupe yourself from a terminal with Full Disk Access; a scheduled run" >&2
+        echo "      cannot reach them. Re-run with --verbose to list them." >&2
+    fi
+fi
+if [ "$rc" -ne 0 ]; then
+    echo "error: fclones exited with status $rc" >&2
+    exit "$rc"
+fi
 
 if [ -z "$APPLY" ]; then
     echo >&2

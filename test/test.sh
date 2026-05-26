@@ -324,6 +324,56 @@ case "$out" in
     *) fail "permission: summary missing the Full Disk Access advice (got: $out)" ;;
 esac
 
+# ---- scan-time permission denials from fclones are folded into one counted note
+# with Full Disk Access advice, not streamed per-folder; --verbose restores the
+# raw fclones lines. This is the OTHER permission layer from the engine case above
+# and the common one: fclones fails at readdir on an unreadable folder (a
+# TCC-protected folder on a run without Full Disk Access), so those paths never
+# enter the JSON -- the wrapper, not the engine, must summarize them. A real
+# duplicate pair sits alongside so the run still has work to report. Needs real
+# fclones. (Non-root, like the rest of the suite -- root bypasses the mode bits.) -
+d="$WORK/scanperm"; mkdir -p "$d/scope/readable" "$d/scope/denied"
+head -c 1048576 /dev/urandom > "$d/scope/readable/canon"; cp "$d/scope/readable/canon" "$d/scope/readable/dup"
+printf 'unreadable\n' > "$d/scope/denied/x"
+chmod 000 "$d/scope/denied"            # fclones cannot readdir this -> scan-time denial
+err=$("$SCRIPT" --scope "$d/scope" --min 1 2>&1 >/dev/null)
+verbose_err=$("$SCRIPT" --scope "$d/scope" --min 1 --verbose 2>&1 >/dev/null)
+chmod 755 "$d/scope/denied"            # restore before asserting (and so cleanup can recurse)
+# Default: the raw per-folder "Permission denied" line is suppressed...
+case "$err" in
+    *"Permission denied"*) fail "scan-perm: raw fclones permission line leaked without --verbose (got: $err)" ;;
+    *) pass "scan-perm: raw per-folder denial suppressed by default" ;;
+esac
+# ...and replaced by one counted note that advises granting Full Disk Access.
+case "$err" in
+    *"could not be read"*"Full Disk Access"*) pass "scan-perm: denials summarized with Full Disk Access advice" ;;
+    *) fail "scan-perm: summarized denial note/advice missing (got: $err)" ;;
+esac
+# --verbose surfaces the raw fclones diagnostic for debugging.
+case "$verbose_err" in
+    *"Permission denied"*) pass "scan-perm: --verbose restores the raw fclones permission line" ;;
+    *) fail "scan-perm: --verbose did not surface the raw fclones line (got: $verbose_err)" ;;
+esac
+
+# ---- a hard fclones failure (non-zero exit) is surfaced and propagated, never
+# swallowed behind the permission summary. Capturing fclones' stderr to fold the
+# denial noise must not also hide a real failure (bad args, crash): stub fclones
+# to fail with a diagnostic on stderr; the wrapper must replay that diagnostic and
+# exit non-zero, not print a clean summary. ----
+d="$WORK/fcfail"; mkdir -p "$d/bin" "$d/scope"
+cat > "$d/bin/fclones" <<'EOF'
+#!/bin/sh
+echo "fclones: error: something broke" >&2
+exit 2
+EOF
+chmod +x "$d/bin/fclones"
+rc=0; err=$(PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" 2>&1 >/dev/null) || rc=$?
+if [ "$rc" -ne 0 ]; then pass "fcfail: wrapper propagates a non-zero fclones exit"; else fail "fcfail: wrapper swallowed a fclones failure (rc=0)"; fi
+case "$err" in
+    *"something broke"*) pass "fcfail: fclones' own diagnostic is surfaced, not hidden by the summary" ;;
+    *) fail "fcfail: fclones diagnostic lost (got: $err)" ;;
+esac
+
 # ---- --exclude globs reach fclones intact (no word-split, no globbing) --
 # The wrapper builds fclones's argument vector. An exclude glob with a space
 # (e.g. "Application Support") must arrive as ONE argument, and a glob such as
