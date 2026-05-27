@@ -255,9 +255,10 @@ fi
 #   - app-private stores -- Mail, Messages, Safari, the per-app sandbox
 #     Containers -- live databases holding little duplicate data and much that
 #     is sensitive;
-#   - OS-managed data -- Spotlight's index, the on-device intelligence/Siri
-#     stores, sandboxed daemon data -- machine-generated and constantly
-#     rewritten, with nothing worth deduping.
+#   - OS-managed data -- Spotlight's index; the on-device intelligence/Siri,
+#     identity, home-automation, and similar system stores; sandboxed daemon
+#     data -- machine-generated and constantly rewritten, with nothing worth
+#     deduping.
 # With --include-app-data on an unattended scheduled job, macOS denies access to
 # these (errno "Operation not permitted"); the denial lands at fclones' scan, so
 # the wrapper folds those scan-time denials into one counted note (see the fclones
@@ -283,7 +284,17 @@ if [ -z "$INCLUDE_APP_DATA" ]; then
         --exclude '**/Library/DoNotDisturb/**' \
         --exclude '**/Library/Suggestions/**' \
         --exclude '**/Library/Daemon Containers/**' \
-        --exclude '**/Library/AppleMediaServices/**'
+        --exclude '**/Library/AppleMediaServices/**' \
+        --exclude '**/Library/Assistant/**' \
+        --exclude '**/Library/PersonalizationPortrait/**' \
+        --exclude '**/Library/com.apple.aiml.instrumentation/**' \
+        --exclude '**/Library/IdentityServices/**' \
+        --exclude '**/Library/Accounts/**' \
+        --exclude '**/Library/HomeKit/**' \
+        --exclude '**/Library/Sharing/**' \
+        --exclude '**/Library/StatusKit/**' \
+        --exclude '**/Library/Weather/**' \
+        --exclude '**/Library/Shortcuts/**'
 fi
 
 # The Trash holds files pending deletion -- cloning them shares storage about to
