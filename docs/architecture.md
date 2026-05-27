@@ -224,8 +224,10 @@ README ("Why didn't free space change? Snapshots") for the operator-facing steps
   (Spotlight's index, `Metadata/CoreSpotlight`; the on-device intelligence and
   proactive-suggestion stores `IntelligencePlatform`, `Biome`, `Trial`,
   `DuetExpertCenter`, `Suggestions`; media-services and Focus state
-  `AppleMediaServices`, `DoNotDisturb`; and sandboxed `Daemon Containers`) is
-  machine-generated, constantly rewritten, and worth nothing deduped. Scanning either makes macOS prompt on an interactive run
+  `AppleMediaServices`, `DoNotDisturb`; the Siri, identity, and home-automation
+  stores `Assistant`, `IdentityServices`, `HomeKit`; and sandboxed
+  `Daemon Containers`) is machine-generated, constantly rewritten, and worth
+  nothing deduped. Scanning either makes macOS prompt on an interactive run
   or deny access (`Operation not permitted`) on the scheduled job; the denial lands
   at `fclones`' scan (a denied folder never enters the report), so the *wrapper* —
   not the engine — folds those scan-time denials into one counted note rather than
