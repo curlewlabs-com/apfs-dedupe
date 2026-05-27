@@ -128,6 +128,61 @@ fi
 
 [ "$(uname -s)" = "Darwin" ] || { echo "error: macOS only (uses APFS clonefile)." >&2; exit 1; }
 
+# Bound the scheduled-run log. When launchd runs the install-daily.sh job it
+# redirects this process's stdout+stderr to one append-only log; left alone that
+# log only grows. The all-users --system daemon leans on the OS's own rotator
+# (newsyslog) for its root-owned log; the per-user agent cannot -- registering a
+# newsyslog rule writes /etc/newsyslog.d, which needs the root the agent install
+# deliberately refuses -- so the agent caps its own log here. When APFS_DEDUPE_LOGFILE
+# names a file over the cap, gzip a copy aside and truncate the original in place.
+# Truncating (not renaming) keeps the very inode launchd holds open, so its
+# O_APPEND writes simply resume from offset zero; renaming would strand that fd on
+# the archived inode, diverting the rest of this run's output there -- the live log
+# would get nothing until the next launch reopens it. This is logrotate's
+# "copytruncate", safe here because the scheduled job is the file's only writer and
+# writes once a day. Size-gated, not age-gated, to stay deterministic (testable
+# without a clock) and to avoid rotating a near-empty log on a schedule.
+# Best-effort: a rotation failure warns and continues -- it must never abort the
+# sweep. The --system daemon does NOT set this variable. See docs/architecture.md.
+APFS_DEDUPE_LOG_MAX_BYTES=1048576   # 1 MiB
+APFS_DEDUPE_LOG_KEEP=3              # compressed generations to retain
+rotate_log() {
+    _log=$1
+    [ -f "$_log" ] || return 0
+    _size=$(stat -f %z "$_log" 2>/dev/null) || return 0
+    case "$_size" in '' | *[!0-9]*) return 0 ;; esac
+    [ "$_size" -gt "$APFS_DEDUPE_LOG_MAX_BYTES" ] || return 0
+    # Age the compressed archives outward (.(keep-1).gz -> .keep.gz drops the
+    # oldest) so the archives stay bounded too, not just the live log -- otherwise
+    # rotation would just move the unbounded growth into .N.gz files.
+    _i=$APFS_DEDUPE_LOG_KEEP
+    while [ "$_i" -gt 1 ]; do
+        _prev=$((_i - 1))
+        if [ -f "$_log.$_prev.gz" ]; then
+            mv -f "$_log.$_prev.gz" "$_log.$_i.gz" 2>/dev/null || true
+        fi
+        _i=$_prev
+    done
+    if gzip -c "$_log" >"$_log.1.gz.tmp" 2>/dev/null && mv -f "$_log.1.gz.tmp" "$_log.1.gz" 2>/dev/null; then
+        # Truncate in place -- launchd's open fd keeps appending to this inode (a
+        # rename would strand it on the archive; see the header comment). Guarded
+        # because a failed redirection under set -e would otherwise exit the whole
+        # sweep, breaking the best-effort contract; the { ...; } 2>/dev/null wrapper
+        # means a denied truncate neither aborts nor leaks a raw diagnostic into the log.
+        if { : >"$_log"; } 2>/dev/null; then
+            echo "apfs-dedupe: log exceeded $APFS_DEDUPE_LOG_MAX_BYTES bytes; rotated to $_log.1.gz" >&2
+        else
+            echo "apfs-dedupe: archived $_log but could not truncate it; continuing." >&2
+        fi
+    else
+        rm -f "$_log.1.gz.tmp" 2>/dev/null || true
+        echo "apfs-dedupe: could not rotate log $_log; continuing." >&2
+    fi
+}
+if [ -n "${APFS_DEDUPE_LOGFILE:-}" ]; then
+    rotate_log "$APFS_DEDUPE_LOGFILE"
+fi
+
 # The apply relies on CLONE_NOFOLLOW_ANY for symlink-safe path resolution, which
 # Apple's <sys/clonefile.h> first defines in macOS 15; on older systems that flag
 # bit is silently ignored -- degrading the safety to nothing -- so refuse apply
