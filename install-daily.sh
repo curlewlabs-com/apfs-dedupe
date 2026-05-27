@@ -16,8 +16,10 @@
 #   sudo ./install-daily.sh --system --uninstall  # remove the all-users daemon
 #
 # Both use the CLI's safe defaults: cloud-backed roots (so nothing is faulted
-# down from the cloud) and app-private Library data (Mail/Messages/Safari/
-# containers -- TCC-protected and a poor dedup target) are excluded. They differ
+# down from the cloud), the protected and machine-managed ~/Library data
+# (app-private Mail/Messages/Safari/containers plus OS-managed stores like the
+# Spotlight index and daemon containers -- TCC-protected, poor dedup targets),
+# and the Trash are excluded. They differ
 # in the work floor: the per-user agent uses --git (--min 1) to catch the many
 # small files where savings hide on a dev machine, while the all-users daemon
 # uses --min 1M -- a nightly whole-/Users rescan at --min 1 would hash hundreds

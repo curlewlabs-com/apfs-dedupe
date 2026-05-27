@@ -69,9 +69,11 @@ d="$WORK/locked"; mkdir "$d"
 head -c 1048576 /dev/urandom > "$d/canon"; cp "$d/canon" "$d/dup"
 chflags uchg "$d/dup"
 ino_before=$(ino "$d/dup")
-# Capture stderr (the warnings), discard stdout (the summary): 2>&1 1>/dev/null
-# inside $() points fd2 at the capture pipe, then sends fd1 to /dev/null.
-rc=0; err=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply 2>&1 1>/dev/null) || rc=$?
+# Capture stderr, discard stdout (the summary): 2>&1 1>/dev/null inside $() points
+# fd2 at the capture pipe, then sends fd1 to /dev/null. --verbose makes the
+# per-file skip line (the full-path diagnostic asserted below) reach stderr;
+# without it skips are only counted in the summary.
+rc=0; err=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply --verbose 2>&1 1>/dev/null) || rc=$?
 chflags nouchg "$d/dup"
 if [ "$(ino "$d/dup")" = "$ino_before" ] && [ "$rc" -eq 0 ]; then
     pass "fail-safe: immutable file skipped, clean exit"
@@ -144,7 +146,7 @@ dirfd = os.open(real, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXE
 # symlink to a directory they control.
 os.rename(real, os.path.join(base, "real_moved"))
 os.symlink(os.path.join(base, "attacker"), real)
-ok = apply._clone_over(os.path.join(base, "canon"), dirfd, "dup", lambda m: None)
+ok = apply._clone_over(os.path.join(base, "canon"), dirfd, "dup", apply._Skips(lambda m: None, False))
 os.close(dirfd)
 sys.exit(0 if ok else 4)
 PY
@@ -200,7 +202,7 @@ import apply, os, sys
 base = sys.argv[1]
 dirfd = apply._open_parent_dir(os.path.join(base, "dest", "dup"))
 canonical = os.path.join(base, "realsrc", "link", "canon")   # via realsrc/link -> secret
-ok = apply._clone_over(canonical, dirfd, "dup", lambda m: None)
+ok = apply._clone_over(canonical, dirfd, "dup", apply._Skips(lambda m: None, False))
 os.close(dirfd)
 sys.exit(0 if ok else 3)   # ok=False (skipped) is the safe outcome
 PY
@@ -226,7 +228,7 @@ PYTHONPATH="$HERE/../lib" python3 - "$d" <<'PY' || rc=$?
 import apply, os, sys
 base = sys.argv[1]
 dirfd = apply._open_parent_dir(os.path.join(base, "dest", "dup"))
-ok = apply._clone_over(os.path.join(base, "canon_link"), dirfd, "dup", lambda m: None)
+ok = apply._clone_over(os.path.join(base, "canon_link"), dirfd, "dup", apply._Skips(lambda m: None, False))
 os.close(dirfd)
 sys.exit(0 if ok else 3)
 PY
@@ -282,15 +284,94 @@ case "$out" in
     *"across 0 files"*) pass "hard link: apply reclaim count excludes the hard-linked dup" ;;
     *) fail "hard link: apply counted a hard-linked dup (got: $out)" ;;
 esac
+# Default output summarizes skips by reason on stdout and streams nothing
+# per-file to stderr; --verbose (exercised by the fail-safe case) is what
+# restores the per-file line.
+case "$out" in
+    *"hard-linked elsewhere"*) pass "hard link: skip counted in the summary breakdown" ;;
+    *) fail "hard link: skip not summarized (got: $out)" ;;
+esac
 case "$err" in
-    *hard-linked*) pass "hard link: skip is logged with the reason" ;;
-    *) fail "hard link: skip not logged (got: $err)" ;;
+    *"skip "*) fail "hard link: per-file skip leaked to stderr without --verbose (got: $err)" ;;
+    *) pass "hard link: per-file skip suppressed by default (summarized, not streamed)" ;;
 esac
 # Dry-run must make the same projection, not over-promise reclaimable space.
 dry=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" 2>/dev/null)
 case "$dry" in
     *"across 0 files"*) pass "hard link: dry-run projection also excludes it" ;;
     *) fail "hard link: dry-run over-counted a hard-linked dup (got: $dry)" ;;
+esac
+
+# ---- a permission-denied skip is bucketed as such, and the summary advises
+# granting Full Disk Access -- the one skip reason a user can act on. A directory
+# with no permissions stands in for a TCC-protected folder the run cannot read:
+# the duplicate beneath it must be left untouched and surfaced as a permission
+# skip, not a per-file warning. (Non-root, like the rest of this suite -- root
+# would bypass the mode bits.) ----
+d="$WORK/perm"; mkdir "$d" "$d/locked"
+head -c 1048576 /dev/urandom > "$d/canon"; cp "$d/canon" "$d/locked/dup"
+ino_before=$(ino "$d/locked/dup")
+chmod 000 "$d/locked"            # no search/read -> the engine cannot reach the dup
+out=$(report "$d/canon" "$d/locked/dup" | python3 "$ENGINE" --apply 2>/dev/null)
+chmod 755 "$d/locked"            # restore before asserting (and so cleanup can recurse)
+assert_eq "permission: unreadable duplicate left untouched" "$(ino "$d/locked/dup")" "$ino_before"
+case "$out" in
+    *"unreadable (privacy protection or permissions)"*) pass "permission: skip bucketed as a permission denial" ;;
+    *) fail "permission: skip not bucketed as permission (got: $out)" ;;
+esac
+case "$out" in
+    *"Full Disk Access"*) pass "permission: summary advises granting Full Disk Access" ;;
+    *) fail "permission: summary missing the Full Disk Access advice (got: $out)" ;;
+esac
+
+# ---- scan-time permission denials from fclones are folded into one counted note
+# with Full Disk Access advice, not streamed per-folder; --verbose restores the
+# raw fclones lines. This is the OTHER permission layer from the engine case above
+# and the common one: fclones fails at readdir on an unreadable folder (a
+# TCC-protected folder on a run without Full Disk Access), so those paths never
+# enter the JSON -- the wrapper, not the engine, must summarize them. A real
+# duplicate pair sits alongside so the run still has work to report. Needs real
+# fclones. (Non-root, like the rest of the suite -- root bypasses the mode bits.) -
+d="$WORK/scanperm"; mkdir -p "$d/scope/readable" "$d/scope/denied"
+head -c 1048576 /dev/urandom > "$d/scope/readable/canon"; cp "$d/scope/readable/canon" "$d/scope/readable/dup"
+printf 'unreadable\n' > "$d/scope/denied/x"
+chmod 000 "$d/scope/denied"            # fclones cannot readdir this -> scan-time denial
+err=$("$SCRIPT" --scope "$d/scope" --min 1 2>&1 >/dev/null)
+verbose_err=$("$SCRIPT" --scope "$d/scope" --min 1 --verbose 2>&1 >/dev/null)
+chmod 755 "$d/scope/denied"            # restore before asserting (and so cleanup can recurse)
+# Default: the raw per-folder "Permission denied" line is suppressed...
+case "$err" in
+    *"Permission denied"*) fail "scan-perm: raw fclones permission line leaked without --verbose (got: $err)" ;;
+    *) pass "scan-perm: raw per-folder denial suppressed by default" ;;
+esac
+# ...and replaced by one counted note that advises granting Full Disk Access.
+case "$err" in
+    *"could not be read"*"Full Disk Access"*) pass "scan-perm: denials summarized with Full Disk Access advice" ;;
+    *) fail "scan-perm: summarized denial note/advice missing (got: $err)" ;;
+esac
+# --verbose surfaces the raw fclones diagnostic for debugging.
+case "$verbose_err" in
+    *"Permission denied"*) pass "scan-perm: --verbose restores the raw fclones permission line" ;;
+    *) fail "scan-perm: --verbose did not surface the raw fclones line (got: $verbose_err)" ;;
+esac
+
+# ---- a hard fclones failure (non-zero exit) is surfaced and propagated, never
+# swallowed behind the permission summary. Capturing fclones' stderr to fold the
+# denial noise must not also hide a real failure (bad args, crash): stub fclones
+# to fail with a diagnostic on stderr; the wrapper must replay that diagnostic and
+# exit non-zero, not print a clean summary. ----
+d="$WORK/fcfail"; mkdir -p "$d/bin" "$d/scope"
+cat > "$d/bin/fclones" <<'EOF'
+#!/bin/sh
+echo "fclones: error: something broke" >&2
+exit 2
+EOF
+chmod +x "$d/bin/fclones"
+rc=0; err=$(PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" 2>&1 >/dev/null) || rc=$?
+if [ "$rc" -ne 0 ]; then pass "fcfail: wrapper propagates a non-zero fclones exit"; else fail "fcfail: wrapper swallowed a fclones failure (rc=0)"; fi
+case "$err" in
+    *"something broke"*) pass "fcfail: fclones' own diagnostic is surfaced, not hidden by the summary" ;;
+    *) fail "fcfail: fclones diagnostic lost (got: $err)" ;;
 esac
 
 # ---- --exclude globs reach fclones intact (no word-split, no globbing) --
@@ -321,11 +402,12 @@ else
     fail "excludes: glob was expanded against the cwd (argv: $(tr '\n' '|' < "$d/argv" 2>/dev/null))"
 fi
 
-# ---- the plan/actions go to STDOUT, not stderr (so '> file' keeps them) --
-# The per-file report is the dry-run's primary output; it must be on stdout, or a
-# user redirecting with '> plan.txt' loses everything but the summary (progress
-# and warnings stay on stderr). Capture stdout only (2>/dev/null) and assert the
-# plan line is there; apply records each clone on stdout too, for an audit trail.
+# ---- the dry-run plan and the --apply audit trail go to STDOUT (so '> file'
+# keeps them), and per-file --apply lines are opt-in. The dry-run plan is its
+# primary output and is always on stdout. An --apply run prints only the summary
+# by default -- a nightly /Users sweep clones tens of thousands of files and one
+# line each would bury the log -- and restores the per-file `cloned` audit line
+# under --verbose. (progress/warnings stay on stderr, dropped here with 2>/dev/null.)
 d="$WORK/stdout"; mkdir "$d"
 head -c 1048576 /dev/urandom > "$d/canon"; cp "$d/canon" "$d/dup"
 plan=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" 2>/dev/null)
@@ -333,11 +415,22 @@ case "$plan" in
     *"would clone "*"$d/dup"*) pass "dry-run: the plan is on stdout (captured by > file)" ;;
     *) fail "dry-run: plan missing from stdout (got: $plan)" ;;
 esac
+# --apply without --verbose: the per-file `cloned` line is suppressed (the log-
+# volume lever) but the summary still reports the reclaim. "cloned " appears only
+# in the per-file line, never the summary, so its presence here is a leak.
 head -c 1048576 /dev/urandom > "$d/canon2"; cp "$d/canon2" "$d/dup2"
 applied=$(report "$d/canon2" "$d/dup2" | python3 "$ENGINE" --apply 2>/dev/null)
 case "$applied" in
-    *"cloned "*"$d/dup2"*) pass "apply: each clone is recorded on stdout (audit trail)" ;;
-    *) fail "apply: clone not recorded on stdout (got: $applied)" ;;
+    *"cloned "*"$d/dup2"*) fail "apply: per-file clone line leaked without --verbose (got: $applied)" ;;
+    *"reclaimed: "*"across 1 files"*) pass "apply: per-file lines suppressed by default, reclaim summarized" ;;
+    *) fail "apply: default output missing the reclaim summary (got: $applied)" ;;
+esac
+# --apply --verbose restores the per-file `cloned` audit line on stdout.
+head -c 1048576 /dev/urandom > "$d/canon3"; cp "$d/canon3" "$d/dup3"
+verbose_applied=$(report "$d/canon3" "$d/dup3" | python3 "$ENGINE" --apply --verbose 2>/dev/null)
+case "$verbose_applied" in
+    *"cloned "*"$d/dup3"*) pass "apply: --verbose restores the per-file clone audit line on stdout" ;;
+    *) fail "apply: --verbose did not record the clone on stdout (got: $verbose_applied)" ;;
 esac
 
 # ---- the wrapper consumes real fclones JSON and feeds the apply engine ----
@@ -353,6 +446,14 @@ case "$dry" in
         pass "wrapper: real fclones dry-run reports the duplicate pair" ;;
     *) fail "wrapper: real fclones dry-run did not report the duplicate pair (got: $dry)" ;;
 esac
+# The summary leads with the files fclones considered (2: canon + dup) and the
+# scan duration -- the count read by the wrapper from fclones' real scan log, the
+# duration from its own timing. Pins both against the actual fclones output, so a
+# future fclones that rewords that log line is caught here.
+case "$dry" in
+    *"scanned: 2 files in "*) pass "wrapper: summary reports files-scanned and scan duration" ;;
+    *) fail "wrapper: summary missing the scanned/duration line (got: $dry)" ;;
+esac
 a_before=$(ino "$d/canon"); b_before=$(ino "$d/dup")
 applied=$("$SCRIPT" --apply --scope "$d" --min 1 2>/dev/null)
 if cmp -s "$d/canon" "$d/dup" \
@@ -361,6 +462,41 @@ if cmp -s "$d/canon" "$d/dup" \
 else
     fail "wrapper: real fclones apply did not clone a duplicate (got: $applied)"
 fi
+
+# ---- files-scanned is read best-effort from fclones' scan log, so it degrades
+# safely. When the line the wrapper reads the count from is absent (a future
+# fclones reword, a non-English locale), the count is dropped and the summary
+# reports the scan duration alone -- never a wrong number, never a failure. Stub
+# fclones to emit a valid report but NO "matching selection criteria" line. ----
+d="$WORK/scancount"; mkdir -p "$d/bin" "$d/scope"
+cat > "$d/bin/fclones" <<'EOF'
+#!/bin/sh
+echo "fclones: info: a log line that is not the files-considered count" >&2
+printf '{"header":{"stats":{}},"groups":[]}\n'
+EOF
+chmod +x "$d/bin/fclones"
+out=$(PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" 2>/dev/null)
+case "$out" in
+    *"scanned: "*" files in "*) fail "scancount: emitted a files count fclones never reported (got: $out)" ;;
+    *"scan completed in "*) pass "scancount: unparseable files count omitted, scan duration still reported" ;;
+    *) fail "scancount: scan line missing entirely (got: $out)" ;;
+esac
+
+# ---- and when fclones DOES report the count, thousands separators are stripped:
+# a large count prints as "Found 1,234 ... files matching selection criteria", but
+# the summary must show a clean integer. Stub fclones to emit the comma'd line. ----
+d="$WORK/scancomma"; mkdir -p "$d/bin" "$d/scope"
+cat > "$d/bin/fclones" <<'EOF'
+#!/bin/sh
+echo "[2026-05-26 00:00:00.000] fclones:  info: Found 1,234 (5.6 GB) files matching selection criteria" >&2
+printf '{"header":{"stats":{}},"groups":[]}\n'
+EOF
+chmod +x "$d/bin/fclones"
+out=$(PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" 2>/dev/null)
+case "$out" in
+    *"scanned: 1234 files in "*) pass "scancount: thousands separators stripped to a clean integer" ;;
+    *) fail "scancount: comma'd files count not normalized (got: $out)" ;;
+esac
 
 # ---- _human formats sizes at the unit boundaries, incl. the GiB->TiB
 # fall-through (>= 1024 GiB must stay labelled TiB -- the last unit -- not fall
@@ -381,6 +517,24 @@ if [ "$rc" -eq 0 ]; then
     pass "format: _human unit boundaries and the GiB->TiB fall-through"
 else
     fail "format: _human boundary formatting is wrong"
+fi
+
+# ---- _human_duration formats the scan time for the summary: bare seconds under
+# a minute, then Mm SSs, then Hh MMm. Pure formatting (deterministic, no clock),
+# checked by direct import like _human above -- the minute/hour rollovers are the
+# boundaries worth pinning. ----
+rc=0
+PYTHONPATH="$HERE/../lib" python3 - <<'PY' || rc=$?
+import apply, sys
+cases = {0: "0s", 5: "5s", 59: "59s", 60: "1m00s", 61: "1m01s",
+         599: "9m59s", 3599: "59m59s", 3600: "1h00m", 3661: "1h01m"}
+bad = [s for s, want in cases.items() if apply._human_duration(s) != want]
+sys.exit(0 if not bad else 8)
+PY
+if [ "$rc" -eq 0 ]; then
+    pass "format: _human_duration seconds/minutes/hours boundaries"
+else
+    fail "format: _human_duration boundary formatting is wrong"
 fi
 
 # ---- a duplicate already cloned on an earlier run is detected via its
@@ -650,6 +804,37 @@ if grep -qxF '**/Library/Mail/**' "$d/argv" 2>/dev/null; then
     fail "app-data: --include-app-data should drop the default app-private excludes but did not"
 else
     pass "app-data: --include-app-data opts back into scanning app-private Library data"
+fi
+
+# ---- OS-managed ~/Library data and the Trash are excluded from the scan too --
+# The machine-generated, churning, TCC-protected stores beside the app-private
+# ones (Spotlight index, on-device intelligence, daemon containers) and the Trash
+# (files pending deletion) are never useful dedup targets. --include-app-data
+# re-includes the ~/Library set; the Trash exclude is unconditional. Stub fclones
+# to record argv and assert both. ----
+d="$WORK/osdata"; mkdir -p "$d/bin" "$d/scope"
+cat > "$d/bin/fclones" <<EOF
+#!/bin/sh
+for a in "\$@"; do printf '%s\n' "\$a"; done > "$d/argv"
+printf '{"header":{"stats":{}},"groups":[]}\n'
+EOF
+chmod +x "$d/bin/fclones"
+PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" >/dev/null 2>&1 || true
+if grep -qxF '**/Library/Metadata/CoreSpotlight/**' "$d/argv" 2>/dev/null \
+   && grep -qxF '**/Library/Daemon Containers/**' "$d/argv" 2>/dev/null \
+   && grep -qxF '**/.Trash/**' "$d/argv" 2>/dev/null \
+   && grep -qxF '**/.Trashes/**' "$d/argv" 2>/dev/null; then
+    pass "system-data: OS-managed Library trees and the Trash excluded by default"
+else
+    fail "system-data: default system/Trash excludes missing (argv: $(tr '\n' '|' < "$d/argv" 2>/dev/null))"
+fi
+PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" --include-app-data >/dev/null 2>&1 || true
+if grep -qxF '**/Library/Metadata/CoreSpotlight/**' "$d/argv" 2>/dev/null; then
+    fail "system-data: --include-app-data should drop the OS-managed excludes but did not"
+elif grep -qxF '**/.Trash/**' "$d/argv" 2>/dev/null; then
+    pass "system-data: --include-app-data re-includes Library data but the Trash stays excluded"
+else
+    fail "system-data: Trash exclude should be unconditional but was dropped"
 fi
 
 echo

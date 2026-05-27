@@ -41,6 +41,8 @@ import argparse
 import contextlib
 import ctypes
 import ctypes.util
+import enum
+import errno
 import fcntl
 import json
 import os
@@ -63,8 +65,11 @@ FullPath = NewType("FullPath", str)
 # to the fd -- into a type error rather than a latent diagnostic regression.
 Basename = NewType("Basename", str)
 
-# Output sinks (see dedupe_group/main): log -> stderr (progress, skip warnings),
-# emit -> stdout (the report a user redirects to a file).
+# Output sinks (see dedupe_group/main): log -> stderr (progress, and per-file skip
+# lines only under --verbose -- otherwise skips are summarized by reason, see
+# _Skips). emit -> stdout (the report a user redirects to a file): the dry-run
+# plan always, and in --apply a per-file `cloned` line only under --verbose
+# (otherwise just the run summary).
 Log = Callable[[str], None]
 Emit = Callable[[str], None]
 
@@ -184,6 +189,19 @@ def _human(n: int) -> str:
     return f"{f:.1f} TiB"
 
 
+def _human_duration(seconds: int) -> str:
+    """A scan duration for the run summary: bare seconds under a minute, then
+    Mm SSs, then Hh MMm. Whole seconds is all the wrapper's `date +%s` scan
+    timing resolves -- plenty for a sweep measured in minutes."""
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m{secs:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m"
+
+
 def _same_content_fd(fa: int, fb: int, bufsize: int = 1 << 20) -> bool:
     """True if the two open fds hold identical bytes. Reads from the fds
     directly so the answer reflects the bytes right now (no stat-signature
@@ -284,26 +302,79 @@ def _is_dataless(st_flags: int) -> bool:
     return bool(st_flags & SF_DATALESS)
 
 
-def _skip(log: Log, path: FullPath, reason: str) -> None:
-    """Log that `path` was skipped, and why. `path` is typed FullPath, not
-    Basename, so the dirfd-relative component the syscalls use can never be
-    logged in place of the file's resolvable name -- the ambiguous-basename
-    regression this branding exists to prevent. Skips are diagnostics: they go
-    to stderr (log), never into the stdout report."""
-    log(f"skip {path}: {reason}")
+class SkipKind(enum.Enum):
+    """Why a duplicate was left untouched, classified at the point of the skip.
+    Knowing the reason there lets the run summary break skips down -- and advise
+    on the one the user can fix -- without re-parsing log lines. Definition order
+    is the order the summary lists them."""
+    PERMISSION = "permission"
+    SYMLINK = "symlink"
+    HARD_LINKED = "hardlink"
+    CHANGED = "changed"
+    DATALESS = "dataless"
+    UNREADABLE = "unreadable"
+
+
+# How each skip reason reads in the summary breakdown -- phrased for someone
+# scanning a nightly log, not the raw errno the --verbose per-file line keeps.
+_SKIP_LABEL: dict[SkipKind, str] = {
+    SkipKind.PERMISSION: "unreadable (privacy protection or permissions)",
+    SkipKind.SYMLINK: "reached through a symlinked path component",
+    SkipKind.HARD_LINKED: "hard-linked elsewhere (a clone would break the link)",
+    SkipKind.CHANGED: "changed between the scan and the clone",
+    SkipKind.DATALESS: "cloud-evicted (a clone would re-download them)",
+    SkipKind.UNREADABLE: "could not be examined",
+}
+
+
+def _oserror_kind(e: OSError) -> SkipKind:
+    """Bucket a filesystem OSError for the skip summary. EPERM/EACCES is the
+    privacy-protection / permission case -- the only one the user can act on (by
+    granting Full Disk Access); ELOOP is O_NOFOLLOW_ANY refusing a symlinked path
+    component; anything else is lumped as unreadable."""
+    if e.errno in (errno.EPERM, errno.EACCES):
+        return SkipKind.PERMISSION
+    if e.errno == errno.ELOOP:
+        return SkipKind.SYMLINK
+    return SkipKind.UNREADABLE
+
+
+class _Skips:
+    """Running tally of duplicates left untouched, by reason (see SkipKind).
+
+    On a broad run the skips are the bulk of the output and most -- privacy-
+    protected paths above all -- are nothing to act on one file at a time, so by
+    default they are counted here and reported as an advised summary rather than
+    streamed. --verbose restores the per-file line. `path` is the resolvable
+    FullPath, never the dirfd-relative Basename the syscalls use, so a --verbose
+    line names the file rather than an ambiguous basename -- the regression that
+    branding exists to prevent."""
+
+    def __init__(self, log: Log, verbose: bool) -> None:
+        self._log = log
+        self._verbose = verbose
+        self.counts: dict[SkipKind, int] = {}
+
+    def add(self, kind: SkipKind, path: FullPath, detail: str) -> None:
+        self.counts[kind] = self.counts.get(kind, 0) + 1
+        if self._verbose:
+            self._log(f"skip {path}: {detail}")
+
+    def total(self) -> int:
+        return sum(self.counts.values())
 
 
 def _clone_over(canonical: FullPath, dirfd: int, dup_path: FullPath,
-                log: Log) -> bool:
+                skips: _Skips) -> bool:
     """Replace dup_path with a clone of canonical. Every privileged step is
     anchored on dirfd -- clonefileat/openat/renameat/unlinkat, never a
     re-resolved path -- so a local user who owns the parent directory cannot
     swap a path component to redirect the clone, the metadata copy, or the
     rename into somewhere they do not already control. The fd-relative syscalls
-    address the duplicate by its basename (resolved against dirfd); logs use the
-    full dup_path so a failure on a whole-/Users run names the actual file, not
-    just an ambiguous basename -- a distinction the Basename/FullPath types now
-    enforce. Returns True iff the duplicate was cloned."""
+    address the duplicate by its basename (resolved against dirfd); skip records
+    use the full dup_path so a failure on a whole-/Users run names the actual
+    file, not just an ambiguous basename -- a distinction the Basename/FullPath
+    types now enforce. Returns True iff the duplicate was cloned."""
     dup_name = Basename(os.path.basename(dup_path))
     tmp_name = Basename(".apfsdedupe-" + secrets.token_hex(16))
     try:
@@ -312,7 +383,7 @@ def _clone_over(canonical: FullPath, dirfd: int, dup_path: FullPath,
         # change what we install.
         _clonefileat(canonical, dirfd, tmp_name)
     except OSError as e:
-        _skip(log, dup_path, str(e))
+        skips.add(_oserror_kind(e), dup_path, str(e))
         return False
     try:
         with _openfd(dup_name, os.O_RDONLY, dirfd) as src_fd, \
@@ -322,14 +393,14 @@ def _clone_over(canonical: FullPath, dirfd: int, dup_path: FullPath,
             # check that closes the scan-to-apply window. Never act on a match
             # that went stale.
             if not _same_content_fd(dst_fd, src_fd):
-                _skip(log, dup_path, f"changed since scan, no longer identical to {canonical}")
+                skips.add(SkipKind.CHANGED, dup_path, f"changed since scan, no longer identical to {canonical}")
                 return False
             _fcopy_metadata(src_fd, dst_fd)   # restore the duplicate's own metadata (incl. ACL)
         os.rename(tmp_name, dup_name, src_dir_fd=dirfd, dst_dir_fd=dirfd)  # atomic
         return True
     except OSError as e:
         # Immutable, deny-ACL, permission, cross-device, ... -- fail safe.
-        _skip(log, dup_path, str(e))
+        skips.add(_oserror_kind(e), dup_path, str(e))
         return False
     finally:
         # On success the rename consumed tmp_name (so this unlink no-ops with
@@ -367,14 +438,18 @@ def _space_detail(logical: int, allocated: int) -> str:
     return f"{_human(allocated)} allocated ({_human(logical)} logical)"
 
 
-def dedupe_group(files: list[FullPath], apply: bool,
-                 log: Log, emit: Emit) -> _GroupResult:
+def dedupe_group(files: list[FullPath], apply: bool, verbose: bool,
+                 skips: _Skips, emit: Emit) -> _GroupResult:
     """Clone files[1:] from files[0]. Returns a _GroupResult.
 
-    Two output channels: emit() carries the report a user wants to keep -- the
-    per-file plan (dry-run) or the per-file actions (apply) -- and goes to
-    stdout, so `> plan.txt` captures it. log() carries progress and per-file
-    skip warnings and goes to stderr.
+    Two output channels: emit() carries the report a user keeps and goes to
+    stdout, so `> plan.txt` captures it. In a dry-run that is the per-file plan,
+    always emitted -- it is the whole deliverable. In --apply it is a per-file
+    `cloned` line emitted only under --verbose: on a broad nightly apply those
+    lines are the bulk of the log (one per cloned file) while the run summary
+    already reports the totals, so they are opt-in. Skips are tallied by reason on
+    `skips` for the run summary; the per-file skip line likewise goes to stderr
+    only under --verbose (see _Skips).
 
     A duplicate with the same full extent map as the canonical, on the same
     device, was cloned on an earlier run; it is counted in already_shared (and
@@ -386,7 +461,7 @@ def dedupe_group(files: list[FullPath], apply: bool,
     try:
         cst = os.lstat(canonical)
     except OSError as e:
-        _skip(log, canonical, f"cannot stat (skipping group): {e}")
+        skips.add(_oserror_kind(e), canonical, f"cannot stat (skipping group): {e}")
         return _GroupResult(0, 0, 0, 0, 0, 0)
     if not stat.S_ISREG(cst.st_mode):
         return _GroupResult(0, 0, 0, 0, 0, 0)
@@ -395,7 +470,7 @@ def dedupe_group(files: list[FullPath], apply: bool,
     # re-download deliberately-evicted content -- the wrapper already keeps the
     # cloud roots out of the scan, this guards a cached/standalone run.
     if _is_dataless(cst.st_flags):
-        _skip(log, canonical, "dataless (cloud-evicted); skipping group to avoid forcing a download")
+        skips.add(SkipKind.DATALESS, canonical, "dataless (cloud-evicted); skipping group to avoid forcing a download")
         return _GroupResult(0, 0, 0, 0, 0, 0)
 
     # The canonical's full extent map, computed once (None if it is compressed,
@@ -415,7 +490,7 @@ def dedupe_group(files: list[FullPath], apply: bool,
         try:
             dst = os.lstat(dup)
         except OSError as e:
-            _skip(log, dup, str(e))
+            skips.add(_oserror_kind(e), dup, str(e))
             continue
         if not stat.S_ISREG(dst.st_mode):
             continue
@@ -423,7 +498,7 @@ def dedupe_group(files: list[FullPath], apply: bool,
         # cloud by the content re-verify (which read()s it) or the clone. Skip it
         # rather than re-download evicted content (backstop to the scan exclude).
         if _is_dataless(dst.st_flags):
-            _skip(log, dup, "dataless (cloud-evicted); skipped to avoid forcing a download")
+            skips.add(SkipKind.DATALESS, dup, "dataless (cloud-evicted); skipped to avoid forcing a download")
             continue
         # dup and canonical are already the same inode (fclones listed two names
         # for one file, or they are hard links to each other): nothing to
@@ -437,8 +512,8 @@ def dedupe_group(files: list[FullPath], apply: bool,
         # blocks. Skip it (in dry-run too, so the projection matches apply)
         # rather than break a link or miscount st_size as reclaimable.
         if dst.st_nlink > 1:
-            _skip(log, dup, f"hard-linked ({dst.st_nlink} links); cloning would "
-                  f"break the link and reclaim nothing")
+            skips.add(SkipKind.HARD_LINKED, dup, f"hard-linked ({dst.st_nlink} links); "
+                      f"cloning would break the link and reclaim nothing")
             continue
         # Already cloned on an earlier run? The same full extent map on the same
         # device means dup and canonical share ALL their storage, so re-cloning
@@ -472,11 +547,12 @@ def dedupe_group(files: list[FullPath], apply: bool,
         try:
             dirfd = _open_parent_dir(dup)
         except OSError as e:
-            _skip(log, dup, f"cannot open parent dir: {e}")
+            skips.add(_oserror_kind(e), dup, f"cannot open parent dir: {e}")
             continue
         try:
-            if _clone_over(canonical, dirfd, dup, log):
-                emit(f"cloned {canonical} -> {dup}  ({space})")
+            if _clone_over(canonical, dirfd, dup, skips):
+                if verbose:
+                    emit(f"cloned {canonical} -> {dup}  ({space})")
                 cloned += 1
                 reclaimed_logical += dst.st_size
                 reclaimed_allocated += _allocated_bytes(dst)
@@ -524,6 +600,16 @@ def main() -> int:
         description="Apply APFS-clone deduplication from an fclones JSON report read on stdin.")
     p.add_argument("--apply", action="store_true",
                    help="actually clone duplicates (default: dry-run, changes nothing)")
+    p.add_argument("--verbose", action="store_true",
+                   help="print a line per cloned file (in --apply) and per skipped file "
+                        "(default: an --apply run prints just the summary; a dry-run always "
+                        "prints its full plan)")
+    # Scan stats supplied by the wrapper, which is what runs fclones: it times the
+    # scan and reads the files-considered count from fclones' log. Optional and
+    # hidden -- they are a wrapper->engine seam, not for direct use; run on
+    # hand-built JSON without them and the summary just omits the scan line.
+    p.add_argument("--scan-seconds", type=int, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--files-scanned", type=int, default=None, help=argparse.SUPPRESS)
     args = p.parse_args()
 
     # Authoritative apply-mode safety gate: the engine -- not just the shell
@@ -545,13 +631,19 @@ def main() -> int:
     groups = cast("list[_FclonesGroup]", report.get("groups", []))
     stats = cast("_FclonesStats", report.get("header", {}).get("stats", {}))
 
-    # Two channels: the report a user keeps (plan/actions + summary) -> stdout,
-    # so `> plan.txt` captures it; progress and warnings -> stderr.
+    # Two channels: the report a user keeps -> stdout, so `> plan.txt` captures it
+    # (the dry-run plan and the summary always; per-file `cloned` lines in --apply
+    # only under --verbose); progress and per-file skip lines -> stderr.
     def log(msg: str) -> None:
         print(msg, file=sys.stderr)
 
     def emit(msg: str) -> None:
         print(msg)
+
+    # Skips are tallied by reason and reported in the summary; a per-file line
+    # goes to stderr only under --verbose, since on a broad run they are the bulk
+    # of the output and mostly not actionable file-by-file.
+    skips = _Skips(log, args.verbose)
 
     total_cloned = 0
     total_reclaimed_logical = 0
@@ -563,13 +655,22 @@ def main() -> int:
         files = g.get("files", [])
         if len(files) < 2:
             continue
-        gr = dedupe_group(files, apply=args.apply, log=log, emit=emit)
+        gr = dedupe_group(files, apply=args.apply, verbose=args.verbose, skips=skips, emit=emit)
         total_cloned += gr.cloned
         total_reclaimed_logical += gr.reclaimed_logical
         total_reclaimed_allocated += gr.reclaimed_allocated
         total_already_shared += gr.already_shared
         total_already_shared_logical += gr.already_shared_logical
         total_already_shared_allocated += gr.already_shared_allocated
+
+    # Lead with the scan stats the wrapper supplied (files it considered, how long
+    # the scan took). Omitted when the engine is run directly on hand-built JSON;
+    # the duration can stand alone if the files count could not be read.
+    if args.scan_seconds is not None:
+        if args.files_scanned is not None:
+            print(f"scanned: {args.files_scanned} files in {_human_duration(args.scan_seconds)}")
+        else:
+            print(f"scan completed in {_human_duration(args.scan_seconds)}")
 
     found = stats.get("redundant_file_size")
     if found is not None:
@@ -584,6 +685,24 @@ def main() -> int:
     verb = "reclaimed" if args.apply else "would reclaim"
     print(f"{verb}: {_space_detail(total_reclaimed_logical, total_reclaimed_allocated)} "
           f"across {total_cloned} files")
+
+    # Skips, broken down by reason rather than streamed per-file (see _Skips).
+    # Advise only on the permission case -- the one a user can fix, by granting
+    # Full Disk Access -- since the rest (hard links, cloud-evicted, ...) are
+    # expected and not actionable.
+    if skips.total():
+        width = len(str(max(skips.counts.values())))
+        print(f"skipped: {skips.total()} files")
+        for kind in SkipKind:
+            n = skips.counts.get(kind, 0)
+            if n:
+                print(f"  {n:>{width}}  {_SKIP_LABEL[kind]}")
+        if skips.counts.get(SkipKind.PERMISSION):
+            print("  to include privacy-protected folders (Desktop, Documents, "
+                  "Downloads, ...), run apfs-dedupe yourself from a terminal with "
+                  "Full Disk Access; a scheduled run cannot reach them")
+        if not args.verbose:
+            print("  re-run with --verbose to list every skipped file")
     return 0
 
 

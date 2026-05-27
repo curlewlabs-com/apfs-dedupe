@@ -21,6 +21,7 @@ ALLOW_ROOT=""
 INCLUDE_CLOUD=""
 INCLUDE_APP_DATA=""
 GIT_PRESET=""
+VERBOSE=""
 
 usage() {
     cat <<'EOF'
@@ -53,12 +54,17 @@ Usage: apfs-dedupe.sh [options]
                    cloud, so a broad scan can pull down gigabytes -- leave this
                    off unless those roots are fully downloaded locally.
   --include-app-data
-                   also scan app-private Library data (Mail, Messages, Safari,
-                   per-app sandbox Containers) that is excluded by default: it is
-                   TCC-protected, so scanning prompts for access (or is denied),
-                   and it is a poor dedup target. NOTE: this flag does not stop
-                   those prompts -- Full Disk Access does (and is also what lets
-                   the scan reach Desktop/Documents/Downloads, kept in scope).
+                   also scan the protected, machine-managed ~/Library data
+                   excluded by default: app-private stores (Mail, Messages,
+                   Safari, sandbox Containers) plus OS-managed data (Spotlight
+                   index, on-device intelligence, daemon containers) -- all
+                   TCC-protected and poor dedup targets. Does not grant access:
+                   only Full Disk Access does, which a scheduled daemon cannot
+                   get, so reaching Desktop/Documents/Downloads means running
+                   interactively from a terminal that has it.
+  --verbose        print a line per cloned file (in --apply) and per skipped file;
+                   default: an --apply run prints just the summary and skips are
+                   summarized by reason (a dry-run always prints its full plan)
   -h, --help       show this help
 
 Each duplicate is replaced by a copy-on-write clone of the first file in its
@@ -67,12 +73,18 @@ group: independent inode, shared storage, diverge-on-write. All metadata
 modified (immutable, locked by ACL, permission denied) are skipped, never
 forced.
 
-Output: the per-file plan (dry-run) / actions (apply) and the savings summary
-go to STDOUT; progress and skip warnings go to STDERR. Reclaim summaries lead
-with allocated bytes and show logical duplicate bytes in parentheses, so you can
-save just the plan with a redirect and still watch progress on screen:
-  ./apfs-dedupe.sh > plan.txt        # plan + summary in the file
-  ./apfs-dedupe.sh > plan.txt 2>&1    # everything, including warnings
+Output: the dry-run plan and the savings summary go to STDOUT; progress, and one
+note for any folders that could not be read (privacy protection / permissions)
+with Full Disk Access advice, go to STDERR. The summary leads with the files
+scanned and how long the scan took, then the reclaim (allocated bytes first,
+logical duplicate bytes in parentheses); files examined but left untouched are
+summarized by reason. An --apply run prints just that summary by default -- the
+per-file `cloned` lines are opt-in under --verbose, since a nightly /Users sweep
+clones tens of thousands of files and one line each would bury the log. --verbose
+also adds the raw fclones diagnostics and a per-file skip line on STDERR. Save
+just the plan with a redirect and still watch progress on screen:
+  ./apfs-dedupe.sh > plan.txt                       # dry-run plan + summary in the file
+  ./apfs-dedupe.sh --apply --verbose > clones.txt    # full per-file apply record
 EOF
 }
 
@@ -92,6 +104,7 @@ while [ "$argc" -gt 0 ]; do
         --include-cloud) INCLUDE_CLOUD=1; shift ;;
         --include-app-data) INCLUDE_APP_DATA=1; shift ;;
         --git) GIT_PRESET=1; shift ;;
+        --verbose) VERBOSE=1; shift ;;
         --min) MIN="${2:?--min needs a SIZE}"; MIN_SET=1; shift 2; argc=$((argc - 1)) ;;
         --min=*) MIN="${1#--min=}"; MIN_SET=1; shift ;;
         --scope) SCOPE="${2:?--scope needs a PATH}"; shift 2; argc=$((argc - 1)) ;;
@@ -163,7 +176,8 @@ HERE=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
 APPLY_ENGINE="$HERE/lib/apply.py"
 
 REPORT=$(mktemp)
-trap 'rm -f "$REPORT"' EXIT INT TERM
+FCERR=$(mktemp)
+trap 'rm -f "$REPORT" "$FCERR"' EXIT INT TERM
 
 # Cloud-backed files (iCloud Drive, third-party File Providers, Photos library
 # originals) can be "dataless" -- evicted to the cloud, holding no local bytes.
@@ -180,15 +194,24 @@ if [ -z "$INCLUDE_CLOUD" ]; then
         --exclude '**/*.photoslibrary/**'
 fi
 
-# App-private Library data -- Mail, Messages, Safari, and the per-app sandbox
-# Containers -- is TCC-protected and a poor dedup target: macOS prompts for (or
-# silently denies, logging "Operation not permitted") access to it, and it is
-# mostly live, churning databases holding little duplicate data and much that is
-# sensitive. Keep it out of the scan by default; --include-app-data opts back in.
-# This only trims the prompt/denial noise from the largest app-private trees --
-# Full Disk Access is what actually stops the prompts, and is also what lets the
-# scan reach the TCC-protected user folders we DO want deduped
-# (Desktop/Documents/Downloads); TCC cannot be granted from a CLI. See
+# Protected, churning, or machine-managed ~/Library data, excluded by default
+# and re-included with --include-app-data. Two classes, same rationale (TCC-
+# protected and a poor dedup target):
+#   - app-private stores -- Mail, Messages, Safari, the per-app sandbox
+#     Containers -- live databases holding little duplicate data and much that
+#     is sensitive;
+#   - OS-managed data -- Spotlight's index, the on-device intelligence/Siri
+#     stores, sandboxed daemon data -- machine-generated and constantly
+#     rewritten, with nothing worth deduping.
+# With --include-app-data on an unattended scheduled job, macOS denies access to
+# these (errno "Operation not permitted"); the denial lands at fclones' scan, so
+# the wrapper folds those scan-time denials into one counted note (see the fclones
+# call below) -- the engine never sees them, since denied paths never enter its
+# JSON.
+# NOTE: --include-app-data does not grant access -- only Full Disk Access does, and
+# a LaunchDaemon (run via /bin/sh) cannot be granted it cleanly, so the way to dedup
+# the TCC-protected user folders (Desktop/Documents/Downloads) is to run
+# apfs-dedupe interactively from a terminal that has Full Disk Access. See
 # docs/architecture.md.
 if [ -z "$INCLUDE_APP_DATA" ]; then
     set -- "$@" \
@@ -196,8 +219,24 @@ if [ -z "$INCLUDE_APP_DATA" ]; then
         --exclude '**/Library/Messages/**' \
         --exclude '**/Library/Safari/**' \
         --exclude '**/Library/Containers/**' \
-        --exclude '**/Library/Group Containers/**'
+        --exclude '**/Library/Group Containers/**' \
+        --exclude '**/Library/Metadata/CoreSpotlight/**' \
+        --exclude '**/Library/IntelligencePlatform/**' \
+        --exclude '**/Library/Biome/**' \
+        --exclude '**/Library/Trial/**' \
+        --exclude '**/Library/DuetExpertCenter/**' \
+        --exclude '**/Library/DoNotDisturb/**' \
+        --exclude '**/Library/Suggestions/**' \
+        --exclude '**/Library/Daemon Containers/**' \
+        --exclude '**/Library/AppleMediaServices/**'
 fi
+
+# The Trash holds files pending deletion -- cloning them shares storage about to
+# be freed anyway, never a useful target -- and it is TCC-protected too. Excluded
+# unconditionally: there is no case for deduping the Trash, so no opt-in.
+set -- "$@" \
+    --exclude '**/.Trash/**' \
+    --exclude '**/.Trashes/**'
 
 echo "Scanning $SCOPE (files >= $MIN) with fclones..." >&2
 # --no-ignore --hidden: build caches and dotfiles are exactly where the dupes
@@ -207,8 +246,62 @@ echo "Scanning $SCOPE (files >= $MIN) with fclones..." >&2
 # "$@" holds the --exclude pairs (the cloud-root and app-private defaults above
 # plus any the user passed), quoted so a glob with spaces stays one argument and
 # is not expanded against the cwd.
+#
+# fclones' stderr is captured rather than streamed. A run without Full Disk Access
+# is denied at readdir on every TCC-protected folder it meets (Desktop, Documents,
+# Downloads), and fclones emits one "Failed to read dir ...: Permission denied /
+# Operation not permitted" line per folder. Those paths never enter the JSON, so
+# the engine -- which sees only the report -- cannot summarize them; the wrapper
+# must. Left raw they bury the result, so by default fold them into one counted
+# note carrying the same Full Disk Access advice the engine gives, and pass every
+# other fclones line (its progress/summary, real warnings) straight through.
+rc=0
+scan_start=$(date +%s)
 fclones group --no-ignore --hidden --one-fs --min "$MIN" "$@" \
-    --format json "$SCOPE" >"$REPORT"
+    --format json "$SCOPE" >"$REPORT" 2>"$FCERR" || rc=$?
+scan_secs=$(( $(date +%s) - scan_start ))
+
+# Match the OS strerror text, not fclones' surrounding wording: the errno string
+# is stable across fclones versions. It is English here because launchd jobs run
+# in the C locale and an interactive shell is overwhelmingly English; a non-English
+# interactive run simply falls through to the raw passthrough below, never silence.
+# A non-zero fclones exit is a real failure (bad args, crash), not a denial it
+# recovered from, so replay everything and propagate it rather than hide it behind
+# a summary. --verbose also keeps the raw lines.
+PERM_RE='Permission denied|Operation not permitted'
+if [ "$rc" -ne 0 ] || [ -n "$VERBOSE" ]; then
+    cat "$FCERR" >&2
+else
+    denied=$(grep -cE "$PERM_RE" "$FCERR" 2>/dev/null || true)
+    grep -vE "$PERM_RE" "$FCERR" >&2 || true
+    if [ "${denied:-0}" -gt 0 ]; then
+        echo "note: $denied folder(s) could not be read (privacy protection or permissions) and were skipped." >&2
+        echo "      To include privacy-protected folders (Desktop, Documents, Downloads, ...), run" >&2
+        echo "      apfs-dedupe yourself from a terminal with Full Disk Access; a scheduled run" >&2
+        echo "      cannot reach them. Re-run with --verbose to list them." >&2
+    fi
+fi
+if [ "$rc" -ne 0 ]; then
+    echo "error: fclones exited with status $rc" >&2
+    exit "$rc"
+fi
+
+# Files fclones actually considered (after the --min filter), read best-effort
+# from its scan log to put a scan-size figure in the run summary. This is the one
+# place the wrapper reads fclones' wording rather than a stable errno string
+# (contrast the denial fold above, where matching the wrong text would hide real
+# denials): it is purely informational, so a wording change in a future fclones
+# just drops the count from the summary -- the engine then reports the duration
+# alone -- never a wrong number and never a failure. English-only like the rest
+# (C-locale launchd jobs, overwhelmingly-English interactive shells). Commas in
+# large counts are stripped; anything not left a clean integer is discarded.
+# Anchored on fclones' exact "Found N (SIZE) files matching selection criteria"
+# shape (the count is always followed by the size in parens): a format that does
+# not match drops the count rather than capturing a partial number.
+files_scanned=$(sed -n 's/.*Found \([0-9][0-9,]*\) (.*files matching selection criteria.*/\1/p' "$FCERR" | tail -n1 | tr -d ',')
+case "$files_scanned" in
+    '' | *[!0-9]*) files_scanned="" ;;
+esac
 
 if [ -z "$APPLY" ]; then
     echo >&2
@@ -216,11 +309,15 @@ if [ -z "$APPLY" ]; then
     echo >&2
 fi
 
-if [ -n "$APPLY" ]; then
-    python3 "$APPLY_ENGINE" --apply <"$REPORT"
-else
-    python3 "$APPLY_ENGINE" <"$REPORT"
-fi
+# Engine flags. The --exclude pass-through args in "$@" were consumed by the
+# fclones call above, so the positional list is free to reuse for the engine's
+# argv -- quoted, so nothing re-splits.
+set --
+[ -n "$APPLY" ] && set -- "$@" --apply
+[ -n "$VERBOSE" ] && set -- "$@" --verbose
+set -- "$@" --scan-seconds "$scan_secs"
+[ -n "$files_scanned" ] && set -- "$@" --files-scanned "$files_scanned"
+python3 "$APPLY_ENGINE" "$@" <"$REPORT"
 
 # After an --apply, APFS/Time Machine *local* snapshots (taken hourly) are
 # copy-on-write and pin the blocks they captured, so blocks just freed can stay

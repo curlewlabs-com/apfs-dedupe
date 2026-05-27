@@ -216,19 +216,67 @@ README ("Why didn't free space change? Snapshots") for the operator-facing steps
   skips any dataless file that still reaches it (a cached or standalone run). The
   download happens at scan time, so a scan-level exclude — not merely an apply-time
   skip — is what actually prevents it.
-- **Excludes app-private `~/Library` data by default.** Mail, Messages, Safari, and
-  the per-app sandbox `Containers`/`Group Containers` are TCC-protected *and* a poor
-  dedup target — live databases that churn, holding little duplicate data and much
-  that is sensitive. Scanning them makes macOS prompt for access on an interactive
-  run, or silently deny it (logging `Operation not permitted`) on the unattended
-  scheduled job. They are kept out of the scan unless `--include-app-data` is passed.
-  This only trims the noise from the largest app-private trees, though: Desktop,
-  Documents, and Downloads are TCC-protected too, and the way to scan *those* without
-  prompting is to grant the controlling terminal (or the `fclones`/`python3`
-  binaries, for a scheduled LaunchAgent/LaunchDaemon) **Full Disk Access** — the
-  tool cannot grant TCC itself. So the exclude and Full Disk Access are complementary: the exclude keeps
-  the tool out of data that should never be deduped, and Full Disk Access lets it
-  into the user-document folders that should.
+- **Excludes protected and machine-managed `~/Library` data by default.** Two
+  classes, same rationale — TCC-protected *and* poor dedup targets, re-included
+  with `--include-app-data`. App-private stores (Mail, Messages, Safari, the
+  per-app sandbox `Containers`/`Group Containers`) are live databases that churn,
+  holding little duplicate data and much that is sensitive. OS-managed data
+  (Spotlight's index, `Metadata/CoreSpotlight`; the on-device intelligence and
+  proactive-suggestion stores `IntelligencePlatform`, `Biome`, `Trial`,
+  `DuetExpertCenter`, `Suggestions`; media-services and Focus state
+  `AppleMediaServices`, `DoNotDisturb`; and sandboxed `Daemon Containers`) is
+  machine-generated, constantly rewritten, and worth nothing deduped. Scanning either makes macOS prompt on an interactive run
+  or deny access (`Operation not permitted`) on the scheduled job; the denial lands
+  at `fclones`' scan (a denied folder never enters the report), so the *wrapper* —
+  not the engine — folds those scan-time denials into one counted note rather than
+  a per-folder warning (see "Skips are summarized by reason" below). The list is
+  best-effort noise reduction for the largest such trees, not exhaustive — a missed
+  one only costs a counted skip, never safety.
+- **Excludes the Trash always.** `~/.Trash` and the volume `.Trashes` hold files
+  pending deletion — cloning shares storage about to be freed anyway — and are
+  TCC-protected too. There is no case for deduping them, so this exclude has no
+  opt-in.
+- **Full Disk Access is the boundary for the user-document folders.** Desktop,
+  Documents, and Downloads are TCC-protected, so neither the excludes above nor
+  `--include-app-data` reaches them; only **Full Disk Access** does, and the tool
+  cannot grant TCC itself. An interactive run inherits the TCC access of the
+  terminal it runs from, so granting Terminal/iTerm Full Disk Access lets a
+  hands-on `apfs-dedupe` reach those folders. The scheduled `LaunchDaemon` cannot:
+  it runs via `/bin/sh`, so the only binary to grant would be the system shell —
+  Full Disk Access for *every* shell script, which the tool will not recommend —
+  and a background job receives no TCC prompt regardless. So the division of labor
+  is: the daemon covers everything outside the TCC-protected user folders, and a
+  periodic interactive run from an FDA-granted terminal covers those. (Granting a
+  dedicated, signed helper binary Full Disk Access would let the daemon reach them
+  too, but signing/notarizing one is out of scope; see "Out of scope".)
+- **Skips are summarized by reason, not streamed.** A broad run leaves many files
+  untouched — privacy-protected paths above all — and a per-item warning for each
+  buries the result. Denials occur at two layers, and each is folded into a count.
+  At **scan** time, a folder the run cannot read (a TCC-protected user folder
+  without Full Disk Access) fails in `fclones` at `readdir`, so its files never
+  reach the engine; the wrapper captures `fclones`' stderr and collapses those
+  per-folder permission denials (matched by the OS `strerror` text, stable across
+  `fclones` versions) into one counted note, passing `fclones`' own progress and
+  any non-permission warning straight through. At **apply/examine** time, the
+  engine classifies each skip on a file that *did* enter the report (permission,
+  symlinked component, hard-linked, changed-since-scan, cloud-evicted, unreadable)
+  and prints a counted breakdown at the end of the summary. Both advise on the one
+  reason a user can act on: granting Full Disk Access. `--verbose` restores the raw
+  `fclones` lines and the engine's per-file skip line (with the full path) on
+  stderr for debugging.
+- **An `--apply` run prints a summary, not a line per clone.** A nightly `/Users`
+  sweep can clone tens of thousands of files, and one `cloned …` line each would
+  bury the log. So `--apply` emits only the run summary by default, and `--verbose`
+  restores the per-file `cloned` audit line on stdout. A dry-run is the exception —
+  its per-file plan is the whole deliverable, so it always prints. The summary
+  leads with the files scanned and the scan duration (the wrapper times the
+  `fclones` scan and passes both into the engine via `--scan-seconds` /
+  `--files-scanned`), then duplicates found, space already saved by earlier clones,
+  space reclaimed, and the skip breakdown. The files-scanned count is read
+  best-effort from `fclones`' own scan log and is simply dropped if a future
+  `fclones` rewords that line — informational only, unlike the permission fold
+  above, which matches the stable `strerror` text because getting it wrong would
+  hide real denials.
 - **`--min 1M`, with a `--git` preset that drops to `1`.** APFS allocates ordinary
   file data in 4 KiB blocks and does not inline regular-file data, so cloning any
   ordinary allocated duplicate frees at least one whole block (4 KiB) regardless
@@ -267,3 +315,17 @@ This is APFS-only by construction. The portable equivalent on Linux is reflink
 (`FICLONE`) on btrfs/XFS/bcachefs/ZFS — and `FIDEDUPERANGE` there is both in-place
 (no window) and kernel-verified, so a Linux build would look quite different. ext4
 has no copy-on-write primitive at all.
+
+### Full Disk Access for the scheduled daemon
+
+The `LaunchDaemon` runs via `/bin/sh`, and TCC attributes a grant to the
+executable that runs — the system shell here, not the script — so there is no
+narrow binary to grant Full Disk Access; granting `/bin/sh` would extend it to
+every shell script on the machine. The clean fix is a dedicated, code-signed
+helper binary that performs the file I/O itself and is granted Full Disk Access
+specifically, but signing and notarizing a distributable binary (a Developer ID
+account, and a stable Designated Requirement so the grant survives updates) is a
+disproportionate amount of machinery for the payoff. Until then the daemon
+deliberately does not reach the TCC-protected user folders; a periodic
+interactive run from a Full-Disk-Access terminal covers them (see "Full Disk
+Access is the boundary for the user-document folders" above).
