@@ -307,6 +307,56 @@ README ("Why didn't free space change? Snapshots") for the operator-facing steps
   aimed at user data. The system volume is a sealed read-only snapshot, so Apple's
   system files cannot be modified in any case — they would error and be skipped.
 
+## Bounding the scheduled-run log
+
+The principle that shapes the rest of the tool decides this too: **lean on the
+OS's proven, trusted primitives wherever they reach, and write our own code only
+where they can't.** `apfs-dedupe` already delegates detection to `fclones` and
+scheduling to launchd rather than reimplement either; log rotation is the same
+call. A scheduled run (see `install-daily.sh`) has launchd redirect the job's
+stdout and stderr to a single append-only log. The earlier phases that cut
+*per-run* volume — skipping already-cloned files, summarizing instead of streaming
+a line per file — do not bound the *total*: a once-a-day append still grows without
+limit. The two install modes bound it differently, because the trusted primitive
+reaches one and not the other.
+
+**System daemon → `newsyslog`.** macOS ships a log rotator that runs as root on its
+own schedule and reads `/etc/newsyslog.d/*`. For the all-users daemon this is the
+native fit: the install already runs as root, so it drops a rule there
+(`com.curlewlabs.apfs-dedupe.conf`), and an operator auditing rotation policy finds
+it where they expect — not buried in a shell script. The rule recreates each
+rotated archive `root:wheel 0600`, matching the live log (which names paths under
+every user's home), so compression never widens read access. Rotation is
+size-triggered (1 MiB, keep 7 gzipped), not time-triggered, so a near-empty log is
+never churned on a clock. `newsyslog` rotates by renaming the log aside and
+starting a fresh one — safe here precisely because the daemon is a *periodic* job:
+launchd opens the log only for the seconds the daily run takes and closes it on
+exit, so `newsyslog` (waking every ~30 min) almost always rotates while no fd is
+open, and the next run's launchd open lands on the fresh file.
+
+**Per-user agent → self-rotation in `apfs-dedupe.sh`.** This is the one place the
+trusted primitive can't reach: registering a `newsyslog` rule writes
+`/etc/newsyslog.d`, which needs root — and the agent install deliberately runs as
+you, unprivileged. Rather than break that (a "rootless install, now run `sudo` to
+bound the log" is a worse contract — the safe outcome must not be opt-in), the
+agent caps its own log. When launchd sets `APFS_DEDUPE_LOGFILE` in the agent plist,
+the run, at startup, gzips the log aside and **truncates it in place** if it is over
+the cap (`rotate_log`, 1 MiB, keep 3). Truncating in place matters here in a way it
+does not for the daemon: the agent rotates its *own* log at the very moment launchd
+is holding that file open as the run's stdout, so a rename would divert the rest of
+this run's output into the archive and lose it until the next launch — truncating
+keeps that open fd writing to the live inode (`O_APPEND` resumes from offset zero).
+This is logrotate's `copytruncate`, correct because the scheduled run is the file's
+only writer. It archives outward (`.1.gz` → `.keep.gz`, dropping the oldest) so the
+archives stay bounded too, is size-gated rather than age-gated (deterministic,
+testable without a clock), and is best-effort: a rotation failure warns and never
+aborts the sweep.
+
+The split is not two ad-hoc mechanisms; it is the root/rootless boundary the
+installer already draws everywhere else — launchd domain, plist location, default
+scope, work floor, file ownership — applied once more, each mode using the most
+trusted tool its privilege level can reach.
+
 ## Out of scope (for now)
 
 ### Non-APFS / Linux

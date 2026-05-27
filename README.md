@@ -244,7 +244,7 @@ over your home directory:
 ./install-daily.sh                  # scope defaults to $HOME
 ./install-daily.sh --scope ~/code   # or a narrower scope
 ./install-daily.sh --min 1M         # override the default --git / --min 1 preset
-./install-daily.sh --print          # preview the generated plist; install nothing
+./install-daily.sh --print          # preview what would be installed; install nothing
 ./install-daily.sh --uninstall      # remove it
 ```
 
@@ -254,7 +254,10 @@ roots, app-private and OS-managed `~/Library` data, and the Trash excluded, and
 it cannot get Full Disk Access and does not reach Desktop/Documents/Downloads — run
 the CLI by hand from a Full-Disk-Access terminal for those. The first run does the
 real work; later runs are cheap, because already-cloned files are detected and
-skipped. Output is appended to `~/Library/Logs/apfs-dedupe.log`.
+skipped. Output is appended to `~/Library/Logs/apfs-dedupe.log`, which the daily
+run keeps size-capped — gzipping older logs beside it — so it can't grow without
+bound (it self-rotates because a `newsyslog` rule would need root, which this
+install doesn't use).
 
 A LaunchAgent runs only while you're logged in, so if the Mac is asleep at 02:00
 the run happens at the next wake.
@@ -265,14 +268,17 @@ over all of `/Users`, covering every account:
 ```sh
 sudo ./install-daily.sh --system                 # scope defaults to /Users, --min 1M
 sudo ./install-daily.sh --system --min 1         # scan every non-empty file
-./install-daily.sh --system --print              # preview the plist; install nothing
+./install-daily.sh --system --print              # preview what would be installed; install nothing
 sudo ./install-daily.sh --system --uninstall     # remove it
 ```
 
 It runs **as root** whether or not anyone is logged in, writes
 `/Library/LaunchDaemons/com.curlewlabs.apfs-dedupe.system.plist`, and appends to
 `/Library/Logs/apfs-dedupe.log` (created `root:wheel` `0600`, because it can name
-paths under every user's home). The default system floor is `--min 1M` for
+paths under every user's home). A `newsyslog` rule
+(`/etc/newsyslog.d/com.curlewlabs.apfs-dedupe.conf`, removed by `--uninstall`) keeps
+that log size-capped and gzipped — macOS's own rotator, with archives kept
+`root:wheel 0600` like the log itself. The default system floor is `--min 1M` for
 whole-machine recurring runs; pass `--min 1` if you want the daemon to scan every
 non-empty file daily.
 

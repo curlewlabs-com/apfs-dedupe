@@ -775,6 +775,71 @@ case "$note2" in
     *) pass "snapshots: no note when there are no local snapshots" ;;
 esac
 
+# ---- the per-user agent caps its own log so a daily scheduled run cannot grow it
+# without bound. When APFS_DEDUPE_LOGFILE names a file over the size cap, the run
+# gzips a copy aside and truncates the original in place (copytruncate -- the agent
+# can't register a newsyslog rule without the root its install refuses). The
+# consequence under test is the feature itself: an oversized log is bounded, its
+# history kept compressed, and the archives stay capped rather than relocating the
+# growth. Stub fclones (empty report) so the run is a fast no-op around the
+# rotation, which happens at startup before fclones is called. Size-gated, so the
+# test is deterministic with no clock dependence. ----
+d="$WORK/logrotate"; mkdir -p "$d/bin" "$d/scope"
+cat > "$d/bin/fclones" <<'EOF'
+#!/bin/sh
+printf '{"header":{"stats":{}},"groups":[]}\n'
+EOF
+chmod +x "$d/bin/fclones"
+log="$d/agent.log"
+marker="ROTATED_CONTENT_MARKER"
+# A log over the 1 MiB cap, led by a marker we must find again in the archive.
+{ printf '%s\n' "$marker"; head -c 1100000 /dev/zero | tr '\0' 'x'; } > "$log"
+APFS_DEDUPE_LOGFILE="$log" PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" >/dev/null 2>&1 || true
+# The live log is truncated (the run wrote nothing to it -- launchd does that in
+# production -- so it is now empty) and its prior content lives in the gz archive.
+if [ -f "$log.1.gz" ] && ! grep -qF "$marker" "$log" 2>/dev/null \
+   && gunzip -c "$log.1.gz" 2>/dev/null | grep -qF "$marker"; then
+    pass "logrotate: oversized agent log truncated in place, prior content preserved gzipped"
+else
+    fail "logrotate: oversized log not rotated into the archive (live size $(stat -f %z "$log" 2>/dev/null))"
+fi
+# A log under the cap is left untouched -- no spurious rotation or churn.
+small="$d/small.log"; printf 'under the cap\n' > "$small"
+APFS_DEDUPE_LOGFILE="$small" PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" >/dev/null 2>&1 || true
+if [ ! -f "$small.1.gz" ] && [ "$(cat "$small")" = "under the cap" ]; then
+    pass "logrotate: a log under the cap is left untouched"
+else
+    fail "logrotate: rotated a log that was under the cap"
+fi
+# Archives stay bounded too (keep=3): rotating several times must leave exactly
+# three .gz generations, not an ever-growing pile -- otherwise rotation would just
+# relocate the unbounded growth into archive files. Each cycle refills the live log
+# over the cap, then runs. With the one rotation above, that is five rotations.
+i=0
+while [ "$i" -lt 4 ]; do
+    head -c 1100000 /dev/zero | tr '\0' 'x' > "$log"
+    APFS_DEDUPE_LOGFILE="$log" PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" >/dev/null 2>&1 || true
+    i=$((i + 1))
+done
+gz_count=$(find "$d" -maxdepth 1 -name 'agent.log.*.gz' | wc -l | tr -d ' ')
+assert_eq "logrotate: archives bounded at the keep count after repeated rotation" "$gz_count" "3"
+
+# A rotation it cannot finish must not abort the sweep -- rotate_log is best-effort
+# (docs/architecture.md). Make the oversized log read-only: rotate_log writes the gz
+# archive, then its in-place truncate is denied. Under set -eu an unguarded
+# redirection would exit non-zero right there, before fclones ever runs; the guard
+# keeps the sweep going. Assert the run still finishes cleanly (the no-op sweep's 0).
+ro="$d/readonly.log"
+head -c 1100000 /dev/zero | tr '\0' 'x' > "$ro"
+chmod 0444 "$ro"
+if APFS_DEDUPE_LOGFILE="$ro" PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" >/dev/null 2>&1; then
+    ro_rc=0
+else
+    ro_rc=$?
+fi
+chmod 0644 "$ro"   # restore so the $WORK cleanup can remove it
+assert_eq "logrotate: a truncate it cannot perform does not abort the sweep" "$ro_rc" "0"
+
 # ---- app-private Library data (Mail/Messages/Safari/Containers) is
 # excluded from the scan by default -- it is TCC-protected (so scanning prompts
 # for or is denied access) and a poor dedup target -- and --include-app-data opts

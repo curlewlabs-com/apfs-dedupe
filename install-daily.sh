@@ -9,7 +9,7 @@
 #
 #   ./install-daily.sh                            # per-user agent; scope defaults to $HOME
 #   ./install-daily.sh --scope DIR                # per-user agent, custom scope
-#   ./install-daily.sh --print                    # print the generated plist; install nothing
+#   ./install-daily.sh --print                    # preview what would be installed; install nothing
 #   ./install-daily.sh --uninstall                # remove the per-user agent
 #   sudo ./install-daily.sh --system              # all-users daemon; scope defaults to /Users
 #   sudo ./install-daily.sh --system --min 1      # all-users daemon; scan every non-empty file
@@ -31,7 +31,10 @@
 # A LaunchAgent runs only while you are logged in (a sleeping Mac runs it at next
 # wake); a LaunchDaemon runs regardless of login, which is what an unattended
 # all-users host wants. Output is appended to ~/Library/Logs/apfs-dedupe.log
-# (agent) or /Library/Logs/apfs-dedupe.log (daemon).
+# (agent) or /Library/Logs/apfs-dedupe.log (daemon), and bounded so it cannot grow
+# without limit: the daemon's root-owned log via a macOS-native newsyslog rule, the
+# agent's via size-capped self-rotation in apfs-dedupe.sh (newsyslog would need the
+# root the agent install refuses). See docs/architecture.md.
 #
 # Known limitation: the daemon uses the script and toolchain paths available at
 # install time, including Homebrew paths. That is fine for the intended
@@ -69,13 +72,19 @@ xml_escape() {
 }
 
 # Per-user agent (default) vs all-users daemon (--system) differ in launchd
-# domain, plist location, log path, default scope, and default dedup work floor;
-# see the header comment for the why. WORK_FLAGS_XML is the mode-specific slice
-# of the plist's ProgramArguments, between the shared --apply and --scope SCOPE.
+# domain, plist location, log path, default scope, default dedup work floor, and
+# how the log is bounded; see the header comment for the why. WORK_FLAGS_XML is
+# the mode-specific slice of the plist's ProgramArguments, between the shared
+# --apply and --scope SCOPE. The log-rotation split leans on the OS's own rotator
+# where it can reach: the root daemon log gets a newsyslog rule (NEWSYSLOG_CONF);
+# the agent log can't (newsyslog needs root the agent install refuses), so the
+# agent self-rotates and LOG_ENV_XML points it at its log via APFS_DEDUPE_LOGFILE.
 if [ "$MODE" = "system" ]; then
     LABEL="com.curlewlabs.apfs-dedupe.system"
     PLIST="/Library/LaunchDaemons/$LABEL.plist"
     LOG="/Library/Logs/apfs-dedupe.log"
+    NEWSYSLOG_CONF="/etc/newsyslog.d/com.curlewlabs.apfs-dedupe.conf"
+    LOG_ENV_XML=""
     DOMAIN="system"
     : "${SCOPE:=/Users}"
     : "${MIN:=1M}"
@@ -84,6 +93,8 @@ else
     LABEL="com.curlewlabs.apfs-dedupe.daily"
     PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
     LOG="$HOME/Library/Logs/apfs-dedupe.log"
+    NEWSYSLOG_CONF=""
+    LOG_ENV_XML=$(printf '\n        <key>APFS_DEDUPE_LOGFILE</key>\n        <string>%s</string>' "$(xml_escape "$LOG")")
     DOMAIN="gui/$(id -u)"
     : "${SCOPE:=$HOME}"
     if [ -n "$MIN" ]; then
@@ -139,7 +150,7 @@ $WORK_FLAGS_XML
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>$(xml_escape "$(job_path)")</string>
+        <string>$(xml_escape "$(job_path)")</string>$LOG_ENV_XML
     </dict>
     <key>StartCalendarInterval</key>
     <dict>
@@ -165,8 +176,36 @@ $WORK_FLAGS_XML
 PLIST
 }
 
+# The newsyslog rotation rule for the --system daemon log, dropped into
+# /etc/newsyslog.d so macOS's own log rotator (root, runs periodically) bounds it.
+# This is the OS-native fit for a root-owned log and what an operator auditing
+# /etc/newsyslog.d expects to find -- the agent log can't use it (the conf needs
+# the root the agent install refuses) and self-rotates in apfs-dedupe.sh instead.
+# Columns: logfile owner:group mode count size(KB) when flags. PRIVACY-CRITICAL:
+# the daemon log is root:wheel 0600 because it names paths under every user's home;
+# the owner:group and mode columns recreate each rotated archive the same way, so
+# compression never widens read access -- do not relax 600 here. Size-triggered at
+# 1 MiB (1024 KB), keep 7 generations; '*' disables the time trigger, so a near-empty
+# log is never rotated on a clock. Flags NZ: Z gzips each archive; N marks "no process
+# to signal" -- without it newsyslog SIGHUPs syslogd on every rotation, but syslogd
+# does not write this log (launchd/apfs-dedupe does) and could not be usefully
+# notified anyway. See docs/architecture.md.
+gen_newsyslog_conf() {
+    printf '%s\n' \
+        "# apfs-dedupe --system daemon log rotation -- bounds $LOG." \
+        "# Installed by install-daily.sh --system; removed by --system --uninstall." \
+        "$LOG  root:wheel  600  7  1024  *  NZ"
+}
+
+# --print previews exactly what an install would drop, so it can be reviewed before
+# the root write: the plist always, plus (for --system) the newsyslog rule.
 if [ "$ACTION" = "print" ]; then
     gen_plist
+    if [ "$MODE" = "system" ]; then
+        echo
+        echo "# ---- $NEWSYSLOG_CONF ----"
+        gen_newsyslog_conf
+    fi
     exit 0
 fi
 
@@ -183,6 +222,7 @@ if [ "$ACTION" = "uninstall" ]; then
     launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
     rm -f "$PLIST"
     if [ "$MODE" = "system" ]; then
+        rm -f "$NEWSYSLOG_CONF"
         echo "Removed the all-users apfs-dedupe daemon ($LABEL)."
     else
         echo "Removed the daily apfs-dedupe agent ($LABEL)."
@@ -215,6 +255,14 @@ if [ "$MODE" = "system" ]; then
     touch "$LOG"
     chown root:wheel "$LOG"
     chmod 600 "$LOG"
+    # Bound that log via newsyslog (rotated archives stay root:wheel 600 -- see
+    # gen_newsyslog_conf). /etc/newsyslog.d exists on macOS; mkdir -p keeps this
+    # robust. The conf is world-readable 644 like its siblings there -- it is
+    # rotation policy, not a secret; only the log it names is 600.
+    mkdir -p "$(dirname -- "$NEWSYSLOG_CONF")"
+    gen_newsyslog_conf > "$NEWSYSLOG_CONF"
+    chown root:wheel "$NEWSYSLOG_CONF"
+    chmod 644 "$NEWSYSLOG_CONF"
 fi
 # Reject a malformed plist before asking launchd to load it.
 plutil -lint "$PLIST" >/dev/null || { echo "error: generated plist is invalid: $PLIST" >&2; exit 1; }
@@ -239,7 +287,9 @@ else
 fi
 echo "Logs: $LOG"
 if [ "$MODE" = "system" ]; then
+    echo "      Rotation: newsyslog ($NEWSYSLOG_CONF), size-capped and gzipped."
     echo "Remove with: sudo $0 --system --uninstall"
 else
+    echo "      Rotation: the daily run caps its own log by size, keeping gzipped archives."
     echo "Remove with: $0 --uninstall"
 fi
