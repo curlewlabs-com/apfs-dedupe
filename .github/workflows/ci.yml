@@ -20,7 +20,7 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
       # Pin shellcheck to an exact release rather than ubuntu's preinstalled,
       # floating version: older shellcheck misfires SC2317 on the trap-invoked
       # cleanup() that 0.11.0 (local dev) reads correctly.
@@ -42,7 +42,7 @@ jobs:
     # not define before 15, so the symlink-source test cases require a 15 runner.
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.0
       - uses: dtolnay/rust-toolchain@stable
       # fclones publishes no macOS release asset, so build the exact crate
       # version the wrapper contract smoke is pinned to.
