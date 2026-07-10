@@ -22,6 +22,7 @@ INCLUDE_CLOUD=""
 INCLUDE_APP_DATA=""
 GIT_PRESET=""
 VERBOSE=""
+REQUIRE_AC=""
 
 usage() {
     cat <<'EOF'
@@ -65,6 +66,12 @@ Usage: apfs-dedupe.sh [options]
   --verbose        print a line per cloned file (in --apply) and per skipped file;
                    default: an --apply run prints just the summary and skips are
                    summarized by reason (a dry-run always prints its full plan)
+  --require-ac     skip the run (exit 0, changing nothing) if not on AC power. For
+                   unattended/scheduled use so a laptop on battery -- e.g. during a
+                   power outage -- defers this best-effort sweep to the next run on
+                   AC instead of draining the battery. A desktop with no battery
+                   always reads as AC, so it never skips. Off by default; a manual
+                   run is never gated.
   -h, --help       show this help
 
 Each duplicate is replaced by a copy-on-write clone of the first file in its
@@ -105,6 +112,7 @@ while [ "$argc" -gt 0 ]; do
         --include-app-data) INCLUDE_APP_DATA=1; shift ;;
         --git) GIT_PRESET=1; shift ;;
         --verbose) VERBOSE=1; shift ;;
+        --require-ac) REQUIRE_AC=1; shift ;;
         --min) MIN="${2:?--min needs a SIZE}"; MIN_SET=1; shift 2; argc=$((argc - 1)) ;;
         --min=*) MIN="${1#--min=}"; MIN_SET=1; shift ;;
         --scope) SCOPE="${2:?--scope needs a PATH}"; shift 2; argc=$((argc - 1)) ;;
@@ -127,6 +135,21 @@ if [ -n "$GIT_PRESET" ] && [ -z "$MIN_SET" ]; then
 fi
 
 [ "$(uname -s)" = "Darwin" ] || { echo "error: macOS only (uses APFS clonefile)." >&2; exit 1; }
+
+# Scheduled/unattended runs pass --require-ac: skip entirely when not on AC power.
+# This is a best-effort "reclaim yesterday's duplicates" sweep, not critical work,
+# so on a laptop running on battery -- e.g. during a power outage -- it should not
+# spin the disk and drain the battery, but defer to the next run on AC. Skipped, not
+# failed (exit 0): a deferred cleanup is a normal outcome, and the apply is
+# idempotent, so the next AC run reclaims what this one would have. `pmset -g ps`
+# prints "Now drawing from 'AC Power'" or "'Battery Power'"; a desktop with no
+# battery always reads AC and so never defers. Opt-in via the flag so a manual run
+# is never gated. Mirrors the AC gate on the nightly Time Machine job. Only the
+# start is gated: a run already in progress when AC is lost runs to completion.
+if [ -n "$REQUIRE_AC" ] && ! pmset -g ps | grep -q "AC Power"; then
+    echo "apfs-dedupe: on battery power; skipping this run (--require-ac). The next scheduled run on AC will reclaim." >&2
+    exit 0
+fi
 
 # Bound the scheduled-run log. When launchd runs the install-daily.sh job it
 # redirects this process's stdout+stderr to one append-only log; left alone that

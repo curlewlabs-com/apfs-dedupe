@@ -902,6 +902,58 @@ else
     fail "system-data: Trash exclude should be unconditional but was dropped"
 fi
 
+# ---- --require-ac defers the scheduled sweep when not on AC power ----
+# The install-daily.sh jobs pass --require-ac so a best-effort sweep on battery --
+# e.g. a laptop during a power outage -- skips and waits for the next run on AC
+# rather than spinning the disk and draining the battery. Stub pmset to report
+# battery and fclones to record whether it ran: the wrapper must exit 0 (deferred,
+# not failed) WITHOUT scanning, since the gate sits before the scan. (Stubbing pmset
+# on PATH mirrors the tmutil/fclones stubs above.)
+d="$WORK/requireac-batt"; mkdir -p "$d/bin" "$d/scope"
+cat > "$d/bin/pmset" <<'EOF'
+#!/bin/sh
+echo "Now drawing from 'Battery Power'"
+EOF
+chmod +x "$d/bin/pmset"
+cat > "$d/bin/fclones" <<EOF
+#!/bin/sh
+: > "$d/fclones-ran"
+printf '{"header":{"stats":{}},"groups":[]}\n'
+EOF
+chmod +x "$d/bin/fclones"
+rc=0; out=$(PATH="$d/bin:$PATH" "$SCRIPT" --require-ac --apply --scope "$d/scope" --min 1 2>&1) || rc=$?
+assert_eq "require-ac: a battery run exits 0 (deferred, not failed)" "$rc" "0"
+if [ ! -e "$d/fclones-ran" ]; then
+    pass "require-ac: on battery the sweep defers before scanning (fclones never ran)"
+else
+    fail "require-ac: on battery the sweep scanned anyway"
+fi
+case "$out" in
+    *battery*) pass "require-ac: the battery deferral is logged" ;;
+    *) fail "require-ac: battery deferral not logged (got: $out)" ;;
+esac
+
+# ---- --require-ac runs normally when on AC power ----
+# The gate must defer ONLY on battery; on AC (and on a desktop, which always reads
+# as AC) the sweep runs as usual. Stub pmset to report AC, leave real fclones on
+# PATH, and confirm a real duplicate is still cloned -- proof the gate lets an AC
+# run through end to end.
+d="$WORK/requireac-ac"; mkdir -p "$d/bin" "$d/scope"
+cat > "$d/bin/pmset" <<'EOF'
+#!/bin/sh
+echo "Now drawing from 'AC Power'"
+EOF
+chmod +x "$d/bin/pmset"
+head -c 4096 /dev/urandom > "$d/scope/canon"; cp "$d/scope/canon" "$d/scope/dup"
+a_before=$(ino "$d/scope/canon"); b_before=$(ino "$d/scope/dup")
+PATH="$d/bin:$PATH" "$SCRIPT" --require-ac --apply --scope "$d/scope" --min 1 >/dev/null 2>&1
+if cmp -s "$d/scope/canon" "$d/scope/dup" \
+   && { [ "$(ino "$d/scope/canon")" != "$a_before" ] || [ "$(ino "$d/scope/dup")" != "$b_before" ]; }; then
+    pass "require-ac: on AC the sweep runs and clones a duplicate"
+else
+    fail "require-ac: on AC the gate wrongly blocked the sweep"
+fi
+
 echo
 if [ "$FAILED" -eq 0 ]; then echo "all tests passed"; else echo "some tests FAILED"; fi
 exit "$FAILED"

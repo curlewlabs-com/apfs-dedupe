@@ -359,6 +359,25 @@ installer already draws everywhere else — launchd domain, plist location, defa
 scope, work floor, file ownership — applied once more, each mode using the most
 trusted tool its privilege level can reach.
 
+## AC-gating the scheduled run
+
+The scheduled jobs (`install-daily.sh`, both modes) pass `--require-ac`, so a run
+that begins on battery power skips and exits cleanly, deferring to the next run on
+AC. This follows the same best-effort principle as the rest of the tool: reclaiming
+yesterday's duplicates is not critical work, so on a laptop it should not spin the
+disk and drain the battery — most acutely during a power outage, when the machine
+is running on its reserve. Detection reuses the idiom the nightly Time Machine job
+uses — `pmset -g ps` reports `AC Power` or `Battery Power` — and a desktop with no
+battery always reads as AC, so it never skips. The gate is opt-in via the flag and
+off for a manual invocation: running the CLI by hand on battery is a deliberate act,
+not the unattended sweep the gate governs.
+
+Deferral is cheap because the apply is idempotent: the next run re-scans, skips
+everything already cloned (see "Skipping files already cloned on an earlier run"),
+and reclaims only what has accumulated since — so a skipped night costs a day's
+delay on a non-urgent cleanup, nothing more. Only the run's *start* is gated; a
+sweep already in progress when AC is lost runs to completion.
+
 ## Out of scope (for now)
 
 ### Non-APFS / Linux
