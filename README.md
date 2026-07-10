@@ -183,6 +183,11 @@ apfs-dedupe.sh [--apply] [--scope PATH] [--min SIZE] [--exclude GLOB] [--verbose
   reason (see [Output](#output)); `--verbose` restores the per-file `cloned` line on
   stdout, adds a per-file skip line on stderr, and surfaces the raw `fclones`
   diagnostics for the folders it couldn't read. A dry-run always prints its full plan.
+- `--require-ac` — skip the run (exit 0, changing nothing) if not on AC power. For
+  unattended/scheduled use: a laptop on battery — e.g. during a power outage —
+  defers this best-effort sweep to the next run on AC rather than draining the
+  battery. A desktop (always on AC) never skips. Off by default; a manual run is
+  never gated, and `install-daily.sh` sets it automatically.
 
 ### Output
 
@@ -236,6 +241,12 @@ deletes snapshots; that's your call).
 
 `install-daily.sh` sets up a scheduled run so duplicates created since the last
 run are reclaimed automatically.
+
+Both modes are **AC-gated**: a scheduled run that lands on battery — e.g. a laptop
+during a power outage — skips and defers to the next run on AC, so this best-effort
+cleanup never drains the battery (a desktop always reads as AC and so never skips).
+Only the run's *start* is gated: a sweep already in progress when AC is lost runs to
+completion.
 
 **Per-user (default)** — a **LaunchAgent** that runs as you, every day at 02:00,
 over your home directory:

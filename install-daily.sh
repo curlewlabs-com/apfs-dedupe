@@ -28,6 +28,12 @@
 # well above 1M. The first run does the real work; later runs are cheap because
 # already-cloned files are detected and skipped.
 #
+# Both are AC-gated (--require-ac): a scheduled run that lands on battery -- e.g. a
+# laptop during a power outage -- skips and defers to the next run on AC, so this
+# best-effort cleanup never drains the battery. A desktop always reads as AC and so
+# never skips. Only the run's start is gated: a sweep already in progress when AC is
+# later lost runs to completion.
+#
 # A LaunchAgent runs only while you are logged in (a sleeping Mac runs it at next
 # wake); a LaunchDaemon runs regardless of login, which is what an unattended
 # all-users host wants. Output is appended to ~/Library/Logs/apfs-dedupe.log
@@ -143,6 +149,7 @@ gen_plist() {
         <string>/bin/sh</string>
         <string>$(xml_escape "$TOOL")</string>
         <string>--apply</string>
+        <string>--require-ac</string>
 $WORK_FLAGS_XML
         <string>--scope</string>
         <string>$(xml_escape "$SCOPE")</string>
@@ -276,7 +283,7 @@ rc=0
 err=$(launchctl bootstrap "$DOMAIN" "$PLIST" 2>&1) || rc=$?
 if [ "$MODE" = "system" ]; then who=root; else who=$(id -un); fi
 if [ "$rc" -eq 0 ]; then
-    echo "Installed: apfs-dedupe will run daily at 02:00 over $SCOPE (as $who)."
+    echo "Installed: apfs-dedupe will run daily at 02:00 over $SCOPE (as $who), when on AC power."
 else
     echo "Installed the plist at $PLIST, but launchctl could not load it from here" >&2
     echo "(rc=$rc)${err:+: $err}" >&2
