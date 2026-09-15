@@ -1,7 +1,7 @@
 # Contributing
 
 Thanks for your interest in improving `apfs-dedupe`. It is a focused tool, so the
-bar for a change is "does this make safe, correct APFS deduplication better" —
+bar for a change is "does this make safe, correct APFS deduplication better" -
 bug fixes, safety hardening, and clearer docs are all welcome.
 
 ## Before a large change
@@ -17,7 +17,7 @@ These are the same three checks CI runs on every push and PR (see the README
 "Development" section):
 
 ```sh
-sh test/test.sh                              # integration tests — macOS 15+, real clonefile + fclones
+sh test/test.sh                              # integration tests - macOS 15+, real clonefile + fclones
 npx pyright@1.1.409                          # strict type check of lib/apply.py (CI's exact pin)
 shellcheck apfs-dedupe.sh install-daily.sh test/test.sh
 ```
@@ -30,13 +30,13 @@ check and shellcheck run anywhere.
 
 - **Tests ship with the change.** A bug fix or feature includes a test that
   covers it in the same pull request. CI runs the integration suite on macOS, so
-  you do not need a Mac to have your change verified — but you do need to add the
+  you do not need a Mac to have your change verified - but you do need to add the
   test.
 - **Pin dependencies exactly.** GitHub Actions and tool versions are pinned to
   exact versions (the `pyright` / `shellcheck` / action pins in CI), so a
   resolver cannot silently move them. Match that when adding any. The one
   exception is `dtolnay/rust-toolchain@stable` in CI: it is a toolchain selector
-  rather than a version-pinned action, and the tool it builds — `fclones` — is
+  rather than a version-pinned action, and the tool it builds - `fclones` - is
   itself pinned (`cargo install fclones --version 0.35.0 --locked`).
 - **Comments explain _why_, not _what_.** `lib/apply.py` brands path strings as
   `FullPath` vs `Basename` (`NewType`s that pyright enforces in strict mode) so a
@@ -44,8 +44,19 @@ check and shellcheck run anywhere.
   keep new path handling within that scheme.
 - **Safe by default stays the default.** Dry-run is the default; anything that
   modifies files stays gated behind `--apply` and the existing safety checks.
+- **Keep tracked text ASCII.** Use plain hyphens, `->`, and words instead of
+  Unicode punctuation or decorative symbols.
 
 ## Submitting
 
 Keep each pull request focused on one change, make sure the three checks pass,
 and describe the _why_ in the PR body. CI must be green before merge.
+
+## Releasing
+
+Releases use fixed `vMAJOR.MINOR.PATCH` tags. The repository blocks updates and
+deletions of those tags, and publishing the GitHub Release makes its tag and
+release assets immutable. After merging the release commit to `main`, create
+and push the version tag, then publish that same tag with `gh release create`.
+Do not create a moving version alias unless the release contract is explicitly
+expanded to support one.

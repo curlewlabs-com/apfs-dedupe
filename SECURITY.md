@@ -14,7 +14,7 @@ release. There are no maintained older release branches.
 
 ## Reporting a vulnerability
 
-Report security issues **privately** — do not open a public issue. Use GitHub's
+Report security issues **privately** - do not open a public issue. Use GitHub's
 private vulnerability reporting: open the repository's **Security** tab and
 choose **"Report a vulnerability"**, which opens a private advisory visible only
 to the maintainers.

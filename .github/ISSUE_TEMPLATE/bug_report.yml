@@ -5,8 +5,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        For a **security** issue — anything about path/symlink handling,
-        privilege, or data safety — do not file here. Use the Security tab's
+        For a **security** issue - anything about path/symlink handling,
+        privilege, or data safety - do not file here. Use the Security tab's
         **"Report a vulnerability"** instead.
   - type: textarea
     id: what-happened
