@@ -13,6 +13,7 @@
 #   ./install-daily.sh --uninstall                # remove the per-user agent
 #   sudo ./install-daily.sh --system              # all-users daemon; scope defaults to /Users
 #   sudo ./install-daily.sh --system --min 1      # all-users daemon; scan every non-empty file
+#   sudo ./install-daily.sh --system --exclude GLOB  # leave paths matching GLOB alone; repeatable
 #   sudo ./install-daily.sh --system --uninstall  # remove the all-users daemon
 #
 # Both use the CLI's safe defaults: cloud-backed roots (so nothing is faulted
@@ -27,6 +28,13 @@
 # duplication on a shared host (simulator clones, cached asset bundles) is all
 # well above 1M. The first run does the real work; later runs are cheap because
 # already-cloned files are detected and skipped.
+#
+# Each --exclude GLOB adds to those defaults: the job hands it to apfs-dedupe.sh's
+# own --exclude. A clone replaces a duplicate with a new inode and a fresh ctime,
+# keeping its bytes and mtime, so a process that compares inode or ctime to spot
+# edits -- a build tool guarding its sources during a build -- reads every
+# replaced file as edited. Exclude the trees such a process may be reading while
+# a scheduled run is still going.
 #
 # Both are AC-gated (--require-ac): a scheduled run that lands on battery -- e.g. a
 # laptop during a power outage -- skips and defers to the next run on AC, so this
@@ -51,6 +59,22 @@ set -eu
 HERE=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
 TOOL="$HERE/apfs-dedupe.sh"
 
+# Escape the three characters that would break the plist XML. Paths with spaces
+# are fine inside an XML <string>; &, <, > are not, so a home or repo path
+# containing them stays well-formed.
+xml_escape() {
+    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+# POSIX sh has no arrays, so the excludes accumulate straight into their slice of
+# the plist's ProgramArguments: one --exclude <string> and one glob <string> each,
+# in the order given, so launchd hands the wrapper every glob as a single
+# argument that no shell expands.
+EXCLUDE_XML=""
+add_exclude() {
+    EXCLUDE_XML="$EXCLUDE_XML$(printf '\n        <string>--exclude</string>\n        <string>%s</string>' "$(xml_escape "$1")")"
+}
+
 MODE="user"
 SCOPE=""
 MIN=""
@@ -62,6 +86,8 @@ while [ $# -gt 0 ]; do
         --scope=*) SCOPE="${1#--scope=}"; shift ;;
         --min) MIN="${2:?--min needs a SIZE}"; shift 2 ;;
         --min=*) MIN="${1#--min=}"; shift ;;
+        --exclude) add_exclude "${2:?--exclude needs a GLOB}"; shift 2 ;;
+        --exclude=*) add_exclude "${1#--exclude=}"; shift ;;
         --print) ACTION="print"; shift ;;
         --uninstall) ACTION="uninstall"; shift ;;
         -h|--help)
@@ -69,13 +95,6 @@ while [ $# -gt 0 ]; do
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
-
-# Escape the three characters that would break the plist XML. Paths with spaces
-# are fine inside an XML <string>; &, <, > are not, so a home or repo path
-# containing them stays well-formed.
-xml_escape() {
-    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
-}
 
 # Per-user agent (default) vs all-users daemon (--system) differ in launchd
 # domain, plist location, log path, default scope, default dedup work floor, and
@@ -150,7 +169,7 @@ gen_plist() {
         <string>$(xml_escape "$TOOL")</string>
         <string>--apply</string>
         <string>--require-ac</string>
-$WORK_FLAGS_XML
+$WORK_FLAGS_XML$EXCLUDE_XML
         <string>--scope</string>
         <string>$(xml_escape "$SCOPE")</string>
     </array>

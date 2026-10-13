@@ -279,6 +279,7 @@ over all of `/Users`, covering every account:
 ```sh
 sudo ./install-daily.sh --system                 # scope defaults to /Users, --min 1M
 sudo ./install-daily.sh --system --min 1         # scan every non-empty file
+sudo ./install-daily.sh --system --exclude GLOB  # leave paths matching GLOB alone (repeatable)
 ./install-daily.sh --system --print              # preview what would be installed; install nothing
 sudo ./install-daily.sh --system --uninstall     # remove it
 ```
@@ -298,6 +299,17 @@ shell's `fclones`/`python3` search path in a root daemon. That is appropriate fo
 self-managed personal machine or trusted CI host; a future hardening pass can
 require root-owned, non-group/world-writable tool paths before aiming this at
 adversarial multi-user machines.
+
+**Leaving a tree alone** - `--exclude GLOB` (either mode, repeatable) is written
+into the job and passed to the CLI's own `--exclude`, on top of the defaults above.
+Use it for a tree another process may be reading while a scheduled run is still
+going. A clone replaces each duplicate with a new inode and a fresh ctime, keeping
+its bytes, mtime, and the rest of its metadata, so a tool that compares inode or
+ctime to spot edits reads every replaced file as edited. Bazel is one: its
+`--guard_against_concurrent_changes` check refuses to upload an action's result
+to a cache when a source file among the action's inputs was replaced during the
+build, so a sweep that overlaps a build costs that build its cache writes.
+Exclude such a tool's working trees, for example a CI runner's checkouts.
 
 ## What it does not do (yet)
 

@@ -402,6 +402,50 @@ else
     fail "excludes: glob was expanded against the cwd (argv: $(tr '\n' '|' < "$d/argv" 2>/dev/null))"
 fi
 
+# ---- install-daily.sh --exclude reaches fclones through the installed job ----
+# The installer writes each --exclude into the launchd job's ProgramArguments,
+# and the job's wrapper hands it on to fclones. A glob broken on the way - split
+# at a space, expanded against the cwd, or mangled by the plist's XML escaping
+# (&) - silently scans the tree it was meant to leave alone, every night. Render
+# the job with --print, check it is a plist launchd can load, then run its exact
+# argv with fclones stubbed to record its own argv and pmset stubbed to report AC
+# (so --require-ac lets the run through), and assert every glob arrived whole.
+d="$WORK/install-excludes"; mkdir -p "$d/bin" "$d/scope"
+cat > "$d/bin/fclones" <<EOF
+#!/bin/sh
+for a in "\$@"; do printf '%s\n' "\$a"; done > "$d/argv"
+printf '{"header":{"stats":{}},"groups":[]}\n'
+EOF
+cat > "$d/bin/pmset" <<'EOF'
+#!/bin/sh
+echo "Now drawing from 'AC Power'"
+EOF
+chmod +x "$d/bin/fclones" "$d/bin/pmset"
+touch "$d/scope/decoy.log"   # *.log would expand to this if globbed in the cwd
+rc=0; "$HERE/../install-daily.sh" --print --scope "$d/scope" \
+    --exclude 'App Support/**' --exclude '*.log' --exclude='R&D/**' > "$d/job.plist" || rc=$?
+assert_eq "install excludes: --print accepts both --exclude spellings" "$rc" "0"
+if plutil -lint "$d/job.plist" >/dev/null 2>&1; then
+    pass "install excludes: the rendered job is a valid plist"
+else
+    fail "install excludes: the rendered job is not a valid plist"
+fi
+# A subshell, so rebuilding the job's argv in "$@" leaves the script's own alone.
+(
+    i=0; set --
+    while arg=$(plutil -extract "ProgramArguments.$i" raw -o - "$d/job.plist" 2>/dev/null); do
+        set -- "$@" "$arg"; i=$((i + 1))
+    done
+    cd "$d/scope" && PATH="$d/bin:$PATH" "$@"
+) >/dev/null 2>&1 || true
+for glob in 'App Support/**' '*.log' 'R&D/**'; do
+    if grep -qxF -- "$glob" "$d/argv" 2>/dev/null; then
+        pass "install excludes: '$glob' reaches fclones as one literal argument"
+    else
+        fail "install excludes: '$glob' did not reach fclones whole (argv: $(tr '\n' '|' < "$d/argv" 2>/dev/null))"
+    fi
+done
+
 # ---- the dry-run plan and the --apply audit trail go to STDOUT (so '> file'
 # keeps them), and per-file --apply lines are opt-in. The dry-run plan is its
 # primary output and is always on stdout. An --apply run prints only the summary
