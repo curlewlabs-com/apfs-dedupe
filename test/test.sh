@@ -1011,6 +1011,7 @@ fi
 # Python rather than shell: the gaps are microseconds wide, so these cases wrap the
 # engine's own swap and scan to place a real writer in them.
 if ! python3 "$HERE/test_concurrent_writers.py"; then FAILED=1; fi
+if ! python3 "$HERE/test_inspect.py"; then FAILED=1; fi
 
 # ---- a real run leaves no work files in the tree, and skips its own directory ----
 d="$WORK/workdir"; mkdir -p "$d/tree/a" "$d/tree/b"

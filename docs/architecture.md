@@ -169,8 +169,10 @@ alone can miss it. A run never deletes a file it has not verified.
 **Batching.** A scan costs tens of milliseconds from Python, and a first run over a
 large tree can swap millions of files, so one scan per file could add a day. Swaps
 settle in batches instead, bounded in count (each holds a directory fd, and launchd's
-default limit is low) and in time. A batch keeps the unverified window short while
-costing a small fraction of a millisecond per file.
+default limit is low) and in time. The time bound is what keeps the unverified window
+short, and it also sets the cost: a run that is steadily swapping settles several
+times a second, so on a large tree the scan is a noticeable share of the apply, about
+a tenth in one profile of a 4.7M-file run.
 
 **Writable mappings.** A process can map a file, close the descriptor, and keep
 writing, which a descriptor scan cannot see. Walking every process's memory map takes
@@ -197,6 +199,32 @@ would make per-user runs useless, so the run proceeds and the summary states the
 A reader of the path can also see the pre-write version for a fraction of a second
 before an undo. `--exclude` is the only complete protection, because it keeps a run
 away from a tree entirely.
+
+## Inspecting on threads
+
+Most of a repeat run is reading: an `lstat` and an extent map for every file, to find
+the few that are not already clones. Those calls wait on the disk and release the GIL,
+so they run on a thread pool, and the apply is what stays serial. Nothing that changes
+a file runs on a thread.
+
+**One thread per efficiency core, or one without them.** launchd runs the scheduled
+job as a background process, which macOS keeps on those cores, so that is the capacity
+it has. A background run is held back far more by that priority than by anything
+threads can fix, and the priority stays, because a nightly job the user does not
+notice is worth more than a shorter one.
+
+**An inspection only ever decides to leave a file alone.** It can be seconds old when
+the apply reaches it. That is harmless for the skip decisions: a file wrongly skipped
+is picked up on the next run. It is not harmless for anything else, so a duplicate on
+its way to a swap gets a fresh `lstat` on the main thread and its checks run again.
+`in_use` goes by inode and is the only check that sees a writer whose fd is closed, so
+a stale inode there would miss it. Most duplicates never reach that line, so this
+gives back little of the speedup.
+
+**Inspection stays close behind the apply.** Work is handed out in small tasks with a
+bounded queue, in file order rather than by group, since one group can hold most of a
+report. The bound is what keeps a result seconds old instead of minutes, and keeps a
+large report from being queued in memory twice.
 
 ## Skipping files already cloned on an earlier run
 
@@ -339,6 +367,11 @@ README ("Why didn't free space change? Snapshots") for the operator-facing steps
   reason a user can act on: granting Full Disk Access. `--verbose` restores the raw
   `fclones` lines and the engine's per-file skip line (with the full path) on
   stderr for debugging.
+- **The apply says it is working.** It prints a line when it starts and another
+  every minute, to stderr. It runs for a long time after `fclones` has stopped
+  logging, and a log that goes quiet for an hour looks the same whether the run is
+  healthy or hung. The lines give a percentage rather than a time remaining, since a
+  report starts with its biggest files and the early rate says little about the rest.
 - **An `--apply` run prints a summary, not a line per clone.** A nightly `/Users`
   sweep can clone tens of thousands of files, and one `cloned ...` line each would
   bury the log. So `--apply` emits only the run summary by default, and `--verbose`
