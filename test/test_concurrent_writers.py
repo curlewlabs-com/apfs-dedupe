@@ -32,15 +32,22 @@ sys.stdin.readline()
 os.write(fd, sys.argv[2].encode())
 os.close(fd)
 """
+# libc's mmap rather than Python's, which keeps a dup of the fd for the life of the
+# mapping. That fd would be found by the per-batch scan, leaving this writer unable
+# to show the one thing it is here for: a mapping with no fd at all.
 MAP_WRITABLE = """
-import mmap, os, sys
+import ctypes, mmap, os, sys
+libc = ctypes.CDLL(None, use_errno=True)
+libc.mmap.restype = ctypes.c_void_p
+libc.mmap.argtypes = (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int,
+                      ctypes.c_int, ctypes.c_int64)
 fd = os.open(sys.argv[1], os.O_RDWR)
-m = mmap.mmap(fd, 0)
+addr = libc.mmap(None, os.fstat(fd).st_size, mmap.PROT_READ | mmap.PROT_WRITE,
+                 mmap.MAP_SHARED, fd, 0)
 os.close(fd)
 print("ready", flush=True)
 sys.stdin.readline()
-m[:len(sys.argv[2])] = sys.argv[2].encode()
-m.flush()
+ctypes.memmove(addr, sys.argv[2].encode(), len(sys.argv[2]))
 """
 failed = 0
 
