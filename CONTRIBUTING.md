@@ -8,7 +8,8 @@ bug fixes, safety hardening, and clearer docs are all welcome.
 
 Open an issue describing the problem first. The apply path carries a lot of
 load-bearing safety invariants (symlink-safe fd-anchored steps, content
-re-verification against a frozen clone, crash-safety, ACL fidelity), so a short
+re-verification against a frozen clone, crash-safety, ACL fidelity, and never
+deleting an original that has not been verified), so a short
 discussion up front saves rework.
 
 ## Running the checks
@@ -22,7 +23,8 @@ npx pyright@1.1.409                          # strict type check of lib/apply.py
 shellcheck apfs-dedupe.sh install-daily.sh test/test.sh
 ```
 
-The integration test needs **macOS 15+** (it exercises real `clonefile` /
+`test/test.sh` also runs `test/test_concurrent_writers.py`, which races the apply
+against real writers. The integration test needs **macOS 15+** (it exercises real `clonefile` /
 `CLONE_NOFOLLOW_ANY`) and `fclones` on `PATH` (`brew install fclones`). The type
 check and shellcheck run anywhere.
 

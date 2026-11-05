@@ -45,7 +45,7 @@ xattr -w com.example.tag DUPVAL "$d/dup"
 chmod +a "everyone allow read" "$d/dup"
 touch -t 202001010101 "$d/dup"
 ino_before=$(ino "$d/dup"); mt_before=$(mtime "$d/dup")
-report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply >/dev/null 2>&1
+report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" >/dev/null 2>&1
 
 if [ "$(ino "$d/dup")" != "$ino_before" ]; then pass "apply: duplicate cloned (inode changed)"; else fail "apply: duplicate not cloned"; fi
 if cmp -s "$d/canon" "$d/dup"; then pass "apply: content identical after clone"; else fail "apply: content differs after clone"; fi
@@ -73,7 +73,7 @@ ino_before=$(ino "$d/dup")
 # fd2 at the capture pipe, then sends fd1 to /dev/null. --verbose makes the
 # per-file skip line (the full-path diagnostic asserted below) reach stderr;
 # without it skips are only counted in the summary.
-rc=0; err=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply --verbose 2>&1 1>/dev/null) || rc=$?
+rc=0; err=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" --verbose 2>&1 1>/dev/null) || rc=$?
 chflags nouchg "$d/dup"
 if [ "$(ino "$d/dup")" = "$ino_before" ] && [ "$rc" -eq 0 ]; then
     pass "fail-safe: immutable file skipped, clean exit"
@@ -93,7 +93,7 @@ d="$WORK/falseeq"; mkdir "$d"
 head -c 1048576 /dev/urandom > "$d/canon"
 head -c 1048576 /dev/urandom > "$d/dup"   # same size, different content
 ino_before=$(ino "$d/dup"); sum_before=$(shasum "$d/dup" | cut -d' ' -f1)
-report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply >/dev/null 2>&1
+report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" >/dev/null 2>&1
 if [ "$(ino "$d/dup")" = "$ino_before" ] && [ "$(shasum "$d/dup" | cut -d' ' -f1)" = "$sum_before" ]; then
     pass "verify: mismatched content left untouched"
 else
@@ -107,7 +107,7 @@ d="$WORK/removed-noverify"; mkdir "$d"
 head -c 4096 /dev/urandom > "$d/canon"
 head -c 4096 /dev/urandom > "$d/dup"
 sum_before=$(shasum "$d/dup" | cut -d' ' -f1)
-rc=0; report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply --no-verify >/dev/null 2>&1 || rc=$?
+rc=0; report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" --no-verify >/dev/null 2>&1 || rc=$?
 if [ "$rc" -ne 0 ] && [ "$(shasum "$d/dup" | cut -d' ' -f1)" = "$sum_before" ]; then
     pass "verify: engine rejects removed bypass before touching mismatched bytes"
 else
@@ -131,7 +131,7 @@ if [ "$rc" -ne 0 ]; then pass "guard: refuses --scope /"; else fail "guard: did 
 # clone/rename by path in a user-writable directory lets a local user who owns
 # that directory swap it for a symlink mid-apply and redirect a root clone into
 # an arbitrary same-volume location. The engine pins the duplicate's parent by
-# fd and uses clonefileat/openat/renameat; the swap below must NOT redirect the
+# fd and uses clonefileat/openat/renameatx_np; the swap below must NOT redirect the
 # write into the attacker's directory.
 d="$WORK/redirect"; mkdir "$d" "$d/real" "$d/attacker"
 head -c 4096 /dev/urandom > "$d/canon"
@@ -146,9 +146,12 @@ dirfd = os.open(real, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXE
 # symlink to a directory they control.
 os.rename(real, os.path.join(base, "real_moved"))
 os.symlink(os.path.join(base, "attacker"), real)
-ok = apply._clone_over(os.path.join(base, "canon"), dirfd, "dup", apply._Skips(lambda m: None, False))
-os.close(dirfd)
-sys.exit(0 if ok else 4)
+work_dir = os.path.join(base, ".work")
+skips = apply._Skips(lambda m: None, False)
+swaps = apply._Swaps(apply._open_work_dir(work_dir), work_dir, False, skips, lambda m: None, lambda m: None)
+swaps.swap_in(os.path.join(base, "canon"), dirfd, "dup", os.stat("dup", dir_fd=dirfd), "")
+swaps.flush()
+sys.exit(0 if swaps.cloned == 1 else 4)
 PY
 canon_sum=$(shasum "$d/canon" | cut -d' ' -f1)
 dup_sum=$(shasum "$d/real_moved/dup" 2>/dev/null | cut -d' ' -f1)
@@ -202,9 +205,12 @@ import apply, os, sys
 base = sys.argv[1]
 dirfd = apply._open_parent_dir(os.path.join(base, "dest", "dup"))
 canonical = os.path.join(base, "realsrc", "link", "canon")   # via realsrc/link -> secret
-ok = apply._clone_over(canonical, dirfd, "dup", apply._Skips(lambda m: None, False))
-os.close(dirfd)
-sys.exit(0 if ok else 3)   # ok=False (skipped) is the safe outcome
+work_dir = os.path.join(base, ".work")
+skips = apply._Skips(lambda m: None, False)
+swaps = apply._Swaps(apply._open_work_dir(work_dir), work_dir, False, skips, lambda m: None, lambda m: None)
+swaps.swap_in(canonical, dirfd, "dup", os.stat("dup", dir_fd=dirfd), "")
+swaps.flush()
+sys.exit(0 if swaps.cloned == 1 else 3)   # not cloned (skipped) is the safe outcome
 PY
 dup_after=$(shasum "$d/dest/dup" | cut -d' ' -f1)
 if [ "$rc" -eq 3 ] && [ "$dup_before" = "$dup_after" ]; then
@@ -228,9 +234,12 @@ PYTHONPATH="$HERE/../lib" python3 - "$d" <<'PY' || rc=$?
 import apply, os, sys
 base = sys.argv[1]
 dirfd = apply._open_parent_dir(os.path.join(base, "dest", "dup"))
-ok = apply._clone_over(os.path.join(base, "canon_link"), dirfd, "dup", apply._Skips(lambda m: None, False))
-os.close(dirfd)
-sys.exit(0 if ok else 3)
+work_dir = os.path.join(base, ".work")
+skips = apply._Skips(lambda m: None, False)
+swaps = apply._Swaps(apply._open_work_dir(work_dir), work_dir, False, skips, lambda m: None, lambda m: None)
+swaps.swap_in(os.path.join(base, "canon_link"), dirfd, "dup", os.stat("dup", dir_fd=dirfd), "")
+swaps.flush()
+sys.exit(0 if swaps.cloned == 1 else 3)
 PY
 dup_after=$(shasum "$d/dest/dup" | cut -d' ' -f1)
 if [ "$rc" -eq 3 ] && [ "$dup_before" = "$dup_after" ]; then
@@ -273,7 +282,7 @@ head -c 1048576 /dev/urandom > "$d/canon"; cp "$d/canon" "$d/dup"
 ln "$d/dup" "$d/sibling"            # dup now has st_nlink=2, linked to an out-of-group path
 ino_before=$(ino "$d/dup")
 errfile="$d/err.log"
-out=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply 2>"$errfile")
+out=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" 2>"$errfile")
 err=$(cat "$errfile")
 if [ "$(ino "$d/dup")" = "$ino_before" ] && [ "$(ino "$d/dup")" = "$(ino "$d/sibling")" ]; then
     pass "hard link: linked duplicate left intact (not cloned, link preserved)"
@@ -312,7 +321,7 @@ d="$WORK/perm"; mkdir "$d" "$d/locked"
 head -c 1048576 /dev/urandom > "$d/canon"; cp "$d/canon" "$d/locked/dup"
 ino_before=$(ino "$d/locked/dup")
 chmod 000 "$d/locked"            # no search/read -> the engine cannot reach the dup
-out=$(report "$d/canon" "$d/locked/dup" | python3 "$ENGINE" --apply 2>/dev/null)
+out=$(report "$d/canon" "$d/locked/dup" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" 2>/dev/null)
 chmod 755 "$d/locked"            # restore before asserting (and so cleanup can recurse)
 assert_eq "permission: unreadable duplicate left untouched" "$(ino "$d/locked/dup")" "$ino_before"
 case "$out" in
@@ -463,7 +472,7 @@ esac
 # volume lever) but the summary still reports the reclaim. "cloned " appears only
 # in the per-file line, never the summary, so its presence here is a leak.
 head -c 1048576 /dev/urandom > "$d/canon2"; cp "$d/canon2" "$d/dup2"
-applied=$(report "$d/canon2" "$d/dup2" | python3 "$ENGINE" --apply 2>/dev/null)
+applied=$(report "$d/canon2" "$d/dup2" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" 2>/dev/null)
 case "$applied" in
     *"cloned "*"$d/dup2"*) fail "apply: per-file clone line leaked without --verbose (got: $applied)" ;;
     *"reclaimed: "*"across 1 files"*) pass "apply: per-file lines suppressed by default, reclaim summarized" ;;
@@ -471,7 +480,7 @@ case "$applied" in
 esac
 # --apply --verbose restores the per-file `cloned` audit line on stdout.
 head -c 1048576 /dev/urandom > "$d/canon3"; cp "$d/canon3" "$d/dup3"
-verbose_applied=$(report "$d/canon3" "$d/dup3" | python3 "$ENGINE" --apply --verbose 2>/dev/null)
+verbose_applied=$(report "$d/canon3" "$d/dup3" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" --verbose 2>/dev/null)
 case "$verbose_applied" in
     *"cloned "*"$d/dup3"*) pass "apply: --verbose restores the per-file clone audit line on stdout" ;;
     *) fail "apply: --verbose did not record the clone on stdout (got: $verbose_applied)" ;;
@@ -591,7 +600,7 @@ fi
 # false positive that would skip fresh duplicates. ----
 d="$WORK/alreadyshared"; mkdir "$d"
 head -c 1048576 /dev/urandom > "$d/canon"; cp "$d/canon" "$d/dup"
-out1=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply 2>/dev/null)
+out1=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" 2>/dev/null)
 ino1=$(ino "$d/dup")
 case "$out1" in
     *"already saved"*) fail "already-shared: first run wrongly flagged a fresh copy as already-shared (got: $out1)" ;;
@@ -600,7 +609,7 @@ case "$out1" in
 esac
 # Second apply: dup now shares canon's extents. Skip it (inode stable), reclaim
 # nothing, report the space as already saved.
-out2=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply 2>/dev/null)
+out2=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" 2>/dev/null)
 assert_eq "already-shared: re-run does not re-clone (inode stable)" "$(ino "$d/dup")" "$ino1"
 case "$out2" in
     *"already saved by earlier clones: 1.0 MiB allocated (1.0 MiB logical) across 1 files"*) pass "already-shared: re-run reports space already saved" ;;
@@ -713,7 +722,7 @@ sys.exit(0 if ok else 7)
 PY
 assert_eq "multi-extent: premise (canon is multi-extent; clone's map matches)" "$rc" "0"
 ino_before=$(ino "$d/dup")
-out=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply 2>/dev/null)
+out=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" 2>/dev/null)
 assert_eq "multi-extent: re-run leaves the multi-extent clone untouched (inode stable)" "$(ino "$d/dup")" "$ino_before"
 case "$out" in
     *"already saved by earlier clones: "*" across 1 files"*) pass "multi-extent: a fragmented/sparse clone is recognized as already-shared" ;;
@@ -997,6 +1006,25 @@ if cmp -s "$d/scope/canon" "$d/scope/dup" \
 else
     fail "require-ac: on AC the gate wrongly blocked the sweep"
 fi
+
+# ---- the apply never destroys a concurrent write ----
+# Python rather than shell: the gaps are microseconds wide, so these cases wrap the
+# engine's own swap and scan to place a real writer in them.
+if ! python3 "$HERE/test_concurrent_writers.py"; then FAILED=1; fi
+
+# ---- a real run leaves no work files in the tree, and skips its own directory ----
+d="$WORK/workdir"; mkdir -p "$d/tree/a" "$d/tree/b"
+head -c 65536 /dev/urandom > "$d/tree/a/f"; cp "$d/tree/a/f" "$d/tree/b/f"
+sh "$SCRIPT" --scope "$d/tree" --min 1 --apply >/dev/null 2>&1
+assert_eq "work dir: private to the user" "$(stat -f '%Lp' "$d/tree/.apfsdedupe-work")" "700"
+assert_eq "work dir: empty after a clean run" "$(find "$d/tree/.apfsdedupe-work" -type f | wc -l | tr -d ' ')" "0"
+echo planted > "$d/tree/.apfsdedupe-work/kept"; cp "$d/tree/.apfsdedupe-work/kept" "$d/tree/a/also"
+sh "$SCRIPT" --scope "$d/tree" --min 1 --apply >"$d/out" 2>&1
+assert_eq "work dir: a run does not delete what an earlier run kept" "$(cat "$d/tree/.apfsdedupe-work/kept")" "planted"
+case "$(cat "$d/out")" in
+    *"left by an interrupted run"*) pass "work dir: a run reports what is left there" ;;
+    *) fail "work dir: leftovers not reported" ;;
+esac
 
 echo
 if [ "$FAILED" -eq 0 ]; then echo "all tests passed"; else echo "some tests FAILED"; fi
