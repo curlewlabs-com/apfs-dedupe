@@ -46,12 +46,15 @@ to minutes on a large run, easily long enough for a build to rewrite an artifact
 macOS / APFS only. See docs/architecture.md for the full rationale.
 """
 import argparse
+import collections
+import concurrent.futures
 import contextlib
 import ctypes
 import ctypes.util
 import enum
 import errno
 import fcntl
+import itertools
 import json
 import mmap
 import os
@@ -61,7 +64,7 @@ import stat
 import struct
 import sys
 import time
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
 from typing import NamedTuple, NewType, NoReturn, Optional, TypedDict, cast
 
 # A path that resolves on its own -- absolute, or relative to the process cwd --
@@ -174,6 +177,15 @@ WRITER_MAP_REFRESH_SECONDS = 300.0
 # Enough to identify a pattern. A failure hitting every process would otherwise
 # print the whole process table into a nightly log.
 BLIND_REPORT_MAX = 20
+# Files per task handed to the inspection threads, so that the pool's own overhead
+# is paid per chunk rather than per stat.
+INSPECT_CHUNK = 64
+# Tasks queued per thread. The bound keeps inspection close behind the apply, so a
+# huge report is not all queued in memory and a result is seconds old at most.
+INSPECT_QUEUE_PER_WORKER = 4
+# The apply prints nothing per file by default, so without this a healthy run of
+# an hour looks the same in the log as a hung one.
+PROGRESS_SECONDS = 60.0
 
 _lib = ctypes.CDLL(ctypes.util.find_library("System"), use_errno=True)
 # int clonefileat(int src_dirfd, const char *src, int dst_dirfd,
@@ -203,6 +215,12 @@ _lib.proc_pidfdinfo.restype = ctypes.c_int
 # int proc_name(int pid, void *buffer, uint32_t buffersize)
 _lib.proc_name.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
 _lib.proc_name.restype = ctypes.c_int
+# int sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp,
+#                  size_t newlen)                                   <sys/sysctl.h>
+_lib.sysctlbyname.argtypes = (ctypes.c_char_p, ctypes.c_void_p,
+                              ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p,
+                              ctypes.c_size_t)
+_lib.sysctlbyname.restype = ctypes.c_int
 
 
 def _raise_errno() -> NoReturn:
@@ -397,6 +415,84 @@ def _is_dataless(st_flags: int) -> bool:
     return bool(st_flags & SF_DATALESS)
 
 
+def _sysctl_int(name: str) -> Optional[int]:
+    """The named 32-bit sysctl, or None if this Mac does not have it."""
+    value = ctypes.c_int32()
+    size = ctypes.c_size_t(ctypes.sizeof(value))
+    if _lib.sysctlbyname(name.encode(), ctypes.byref(value), ctypes.byref(size), None, 0) != 0:
+        return None
+    return value.value
+
+
+def _inspect_workers(read: Callable[[str], Optional[int]] = _sysctl_int) -> int:
+    """How many threads inspect files: one per efficiency core, or 1 on a Mac
+    without them. The scheduled run is a background job that macOS keeps on those
+    cores, so more threads than that would only wait on each other, and a run
+    started by hand stays out of the way of whatever else the Mac is doing.
+    perflevel0 is the fastest level, so the last one is the slowest whichever
+    number of levels a chip has."""
+    levels = read("hw.nperflevels")
+    if levels is None or levels < 2:
+        return 1
+    return max(1, read(f"hw.perflevel{levels - 1}.logicalcpu") or 1)
+
+
+class _Inspected(NamedTuple):
+    """What one file looked like when a thread read it, which may no longer be
+    true by the time the apply reaches it. Only good for deciding to leave a file
+    alone: dedupe_group looks again before changing anything."""
+    st: Optional[os.stat_result]
+    error: Optional[OSError]
+    extent_map: Optional[tuple[int, tuple[tuple[int, int], ...]]]
+
+
+def _inspect(path: FullPath) -> _Inspected:
+    """The read-only look at a file, safe to run on any thread since it shares no
+    state. Threads help because the system calls, where the time goes, release the
+    GIL. Dataless files are never opened, since nothing is gained by touching a
+    file the apply will skip."""
+    try:
+        st = os.lstat(path)
+    except OSError as e:
+        return _Inspected(None, e, None)
+    if not stat.S_ISREG(st.st_mode) or _is_dataless(st.st_flags):
+        return _Inspected(st, None, None)
+    return _Inspected(st, None, _extent_map_of(path))
+
+
+def _inspect_chunk(paths: Sequence[FullPath]) -> list[_Inspected]:
+    return [_inspect(p) for p in paths]
+
+
+def _inspect_stream(paths: Iterable[FullPath], workers: int) -> Iterator[_Inspected]:
+    """_inspect of each path, in order, reading ahead on worker threads."""
+    if workers <= 1:
+        yield from map(_inspect, paths)
+        return
+    remaining = iter(paths)
+    with concurrent.futures.ThreadPoolExecutor(workers) as pool:
+        queue: collections.deque[concurrent.futures.Future[list[_Inspected]]] = collections.deque()
+        while True:
+            while len(queue) < workers * INSPECT_QUEUE_PER_WORKER:
+                chunk = list(itertools.islice(remaining, INSPECT_CHUNK))
+                if not chunk:
+                    break
+                queue.append(pool.submit(_inspect_chunk, chunk))
+            if not queue:
+                return
+            yield from queue.popleft().result()
+
+
+def _inspect_groups(groups: Sequence[list[FullPath]], workers: int
+                    ) -> Iterator[tuple[list[FullPath], list[_Inspected]]]:
+    """Each group with its files' inspections, in report order. The stream is by
+    file rather than by group because one group can hold most of a report, and
+    per-group tasks would leave that group on a single thread."""
+    stream = _inspect_stream(itertools.chain.from_iterable(groups), workers)
+    for files in groups:
+        yield files, list(itertools.islice(stream, len(files)))
+
+
 class _BlindSpot(NamedTuple):
     """A process the scan could not read, kept as what a person needs to act on
     it: which process, and why. A pid of 0 means the process list itself failed."""
@@ -578,6 +674,35 @@ class _Skips:
 
     def total(self) -> int:
         return sum(self.counts.values())
+
+
+class _Progress:
+    """Periodic progress lines for a run that otherwise says nothing until its
+    summary. A percentage, not a time remaining: a report starts with its biggest
+    files, so the early rate says little about the rest of the run."""
+
+    def __init__(self, total: int, swaps: "Optional[_Swaps]", skips: _Skips, log: Log,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self._total = total
+        self._swaps = swaps
+        self._skips = skips
+        self._log = log
+        self._clock = clock
+        self._done = 0
+        self._started = clock()
+        self._next = self._started + PROGRESS_SECONDS
+
+    def advance(self, files: int) -> None:
+        self._done += files
+        now = self._clock()
+        if now < self._next:
+            return
+        self._next = now + PROGRESS_SECONDS
+        cloned = "" if self._swaps is None else f", {self._swaps.cloned} cloned"
+        self._log(f"progress: {self._done} of {self._total} files checked "
+                  f"({self._done * 100 // self._total}%){cloned}, "
+                  f"{self._skips.total()} skipped, "
+                  f"{_human_duration(int(now - self._started))} elapsed")
 
 
 class _FileId(NamedTuple):
@@ -826,11 +951,42 @@ def _space_detail(logical: int, allocated: int) -> str:
     return f"{_human(allocated)} allocated ({_human(logical)} logical)"
 
 
-def dedupe_group(files: list[FullPath], swaps: Optional[_Swaps], skips: _Skips,
-                 emit: Emit) -> _GroupResult:
+def _clone_candidate(dup: FullPath, dst: os.stat_result, cst: os.stat_result,
+                     skips: _Skips) -> bool:
+    """True if dup, as dst describes it, could be cloned from the canonical. The
+    check dedupe_group runs on an inspection and again on a fresh lstat."""
+    if not stat.S_ISREG(dst.st_mode):
+        return False
+    # A dataless (cloud-evicted) duplicate would be faulted down from the
+    # cloud by the content re-verify (which read()s it) or the clone. Skip it
+    # rather than re-download evicted content (backstop to the scan exclude).
+    if _is_dataless(dst.st_flags):
+        skips.add(SkipKind.DATALESS, dup, "dataless (cloud-evicted); skipped to avoid forcing a download")
+        return False
+    # dup and canonical are already the same inode (fclones listed two names
+    # for one file, or they are hard links to each other): nothing to
+    # reclaim, and cloning would needlessly split them. Leave them intact.
+    if (dst.st_dev, dst.st_ino) == (cst.st_dev, cst.st_ino):
+        return False
+    # dup has more than one link, so another path (outside this group) also
+    # names its inode. Cloning over this name would break that hard link --
+    # silently turning two names for one inode into two independent files --
+    # and reclaim nothing, since the other link still pins the inode's
+    # blocks. Skip it (in dry-run too, so the projection matches apply)
+    # rather than break a link or miscount st_size as reclaimable.
+    if dst.st_nlink > 1:
+        skips.add(SkipKind.HARD_LINKED, dup, f"hard-linked ({dst.st_nlink} links); "
+                  f"cloning would break the link and reclaim nothing")
+        return False
+    return True
+
+
+def dedupe_group(files: list[FullPath], inspected: Sequence[_Inspected],
+                 swaps: Optional[_Swaps], skips: _Skips, emit: Emit) -> _GroupResult:
     """Clone files[1:] from files[0], or with swaps None plan to. Returns a
     _GroupResult, whose cloned and reclaimed figures are the plan's: an apply's
-    are counted on swaps as each batch settles.
+    are counted on swaps as each batch settles. inspected holds _inspect of each
+    of files.
 
     Two output channels: emit() carries the report a user keeps and goes to
     stdout, so `> plan.txt` captures it. In a dry-run that is the per-file plan,
@@ -848,9 +1004,9 @@ def dedupe_group(files: list[FullPath], swaps: Optional[_Swaps], skips: _Skips,
     already-deduped tree shows ~0 reclaimable -- instead of pointlessly rebuilding
     the same sharing and churning the inode."""
     canonical = files[0]
-    try:
-        cst = os.lstat(canonical)
-    except OSError as e:
+    cst = inspected[0].st
+    if cst is None:
+        e = cast("OSError", inspected[0].error)
         skips.add(_oserror_kind(e), canonical, f"cannot stat (skipping group): {e}")
         return _GroupResult(0, 0, 0, 0, 0, 0)
     if not stat.S_ISREG(cst.st_mode):
@@ -868,7 +1024,7 @@ def dedupe_group(files: list[FullPath], swaps: Optional[_Swaps], skips: _Skips,
     # duplicate as before). A duplicate with the same map on the same device is
     # already a full clone; see _extent_map for why an equal map proves whole-file
     # sharing, fragmented and sparse files included.
-    canonical_map = _extent_map_of(canonical)
+    canonical_map = inspected[0].extent_map
 
     cloned = 0
     reclaimed_logical = 0
@@ -876,34 +1032,13 @@ def dedupe_group(files: list[FullPath], swaps: Optional[_Swaps], skips: _Skips,
     already_shared = 0
     already_shared_logical = 0
     already_shared_allocated = 0
-    for dup in files[1:]:
-        try:
-            dst = os.lstat(dup)
-        except OSError as e:
+    for dup, seen in zip(files[1:], inspected[1:]):
+        dst = seen.st
+        if dst is None:
+            e = cast("OSError", seen.error)
             skips.add(_oserror_kind(e), dup, str(e))
             continue
-        if not stat.S_ISREG(dst.st_mode):
-            continue
-        # A dataless (cloud-evicted) duplicate would be faulted down from the
-        # cloud by the content re-verify (which read()s it) or the clone. Skip it
-        # rather than re-download evicted content (backstop to the scan exclude).
-        if _is_dataless(dst.st_flags):
-            skips.add(SkipKind.DATALESS, dup, "dataless (cloud-evicted); skipped to avoid forcing a download")
-            continue
-        # dup and canonical are already the same inode (fclones listed two names
-        # for one file, or they are hard links to each other): nothing to
-        # reclaim, and cloning would needlessly split them. Leave them intact.
-        if (dst.st_dev, dst.st_ino) == (cst.st_dev, cst.st_ino):
-            continue
-        # dup has more than one link, so another path (outside this group) also
-        # names its inode. Cloning over this name would break that hard link --
-        # silently turning two names for one inode into two independent files --
-        # and reclaim nothing, since the other link still pins the inode's
-        # blocks. Skip it (in dry-run too, so the projection matches apply)
-        # rather than break a link or miscount st_size as reclaimable.
-        if dst.st_nlink > 1:
-            skips.add(SkipKind.HARD_LINKED, dup, f"hard-linked ({dst.st_nlink} links); "
-                      f"cloning would break the link and reclaim nothing")
+        if not _clone_candidate(dup, dst, cst, skips):
             continue
         # Already cloned on an earlier run? The same full extent map on the same
         # device means dup and canonical share ALL their storage, so re-cloning
@@ -911,7 +1046,7 @@ def dedupe_group(files: list[FullPath], swaps: Optional[_Swaps], skips: _Skips,
         # already-saved and skip -- in dry-run too, so the projection matches a
         # real re-run. A partially CoW-broken clone has a divergent extent, so its
         # map differs and it is cloned normally.
-        if canonical_map is not None and _extent_map_of(dup) == canonical_map:
+        if canonical_map is not None and seen.extent_map == canonical_map:
             already_shared += 1
             already_shared_logical += dst.st_size
             already_shared_allocated += _allocated_bytes(dst)
@@ -923,6 +1058,17 @@ def dedupe_group(files: list[FullPath], swaps: Optional[_Swaps], skips: _Skips,
             cloned += 1
             reclaimed_logical += dst.st_size
             reclaimed_allocated += _allocated_bytes(dst)
+            continue
+        # This file is about to be changed, and the inspection could be seconds
+        # old. in_use goes by inode, and only it catches a writer that mapped a
+        # file and closed the fd, so the look has to be current; the cost is small
+        # because most duplicates never reach this line.
+        try:
+            dst = os.lstat(dup)
+        except OSError as e:
+            skips.add(_oserror_kind(e), dup, str(e))
+            continue
+        if not _clone_candidate(dup, dst, cst, skips):
             continue
         if swaps.in_use(dst):
             skips.add(SkipKind.IN_USE, dup, "open for writing by another process")
@@ -1061,17 +1207,24 @@ def main() -> int:
     total_already_shared = 0
     total_already_shared_logical = 0
     total_already_shared_allocated = 0
-    for g in groups:
-        files = g.get("files", [])
-        if len(files) < 2:
-            continue
-        gr = dedupe_group(files, swaps, skips, emit)
+    file_groups = [g["files"] for g in groups if len(g.get("files", [])) >= 2]
+    file_count = sum(map(len, file_groups))
+    workers = _inspect_workers()
+    if file_count:
+        # fclones logs as it goes and this stage is otherwise silent, so without
+        # this line a run looks stalled from the moment fclones exits.
+        log(f"checking {file_count} files in {len(file_groups)} groups "
+            f"on {workers} thread{'s' if workers != 1 else ''}...")
+    progress = _Progress(file_count, swaps, skips, log)
+    for files, inspected in _inspect_groups(file_groups, workers):
+        gr = dedupe_group(files, inspected, swaps, skips, emit)
         total_cloned += gr.cloned
         total_reclaimed_logical += gr.reclaimed_logical
         total_reclaimed_allocated += gr.reclaimed_allocated
         total_already_shared += gr.already_shared
         total_already_shared_logical += gr.already_shared_logical
         total_already_shared_allocated += gr.already_shared_allocated
+        progress.advance(len(files))
     if swaps is not None:
         swaps.flush()
         total_cloned += swaps.cloned

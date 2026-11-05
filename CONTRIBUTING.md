@@ -24,7 +24,8 @@ shellcheck apfs-dedupe.sh install-daily.sh test/test.sh
 ```
 
 `test/test.sh` also runs `test/test_concurrent_writers.py`, which races the apply
-against real writers. The integration test needs **macOS 15+** (it exercises real `clonefile` /
+against real writers, and `test/test_inspect.py`, which covers the threaded
+inspection. The integration test needs **macOS 15+** (it exercises real `clonefile` /
 `CLONE_NOFOLLOW_ANY`) and `fclones` on `PATH` (`brew install fclones`). The type
 check and shellcheck run anywhere.
 

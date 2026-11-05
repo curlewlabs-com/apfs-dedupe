@@ -243,7 +243,8 @@ apfs-dedupe.sh [--apply] [--scope PATH] [--min SIZE] [--exclude GLOB] [--verbose
 ### Output
 
 The dry-run plan **and** the savings summary go to **stdout**; progress
-(`Scanning...`, fclones's own logs) goes to **stderr**. The summary leads with the
+(`Scanning...`, fclones's own logs, and a line a minute from the apply with the
+share of files checked so far) goes to **stderr**. The summary leads with the
 files scanned and how long the scan took, then the reclaim; files left untouched
 are **summarized by reason** at the end, not streamed one per line - and folders an
 un-granted run couldn't read are folded into a single counted note on stderr with

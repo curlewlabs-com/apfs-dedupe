@@ -87,7 +87,8 @@ class Fixture:
                                    self.logged.append, lambda _: None)
 
     def run(self) -> None:
-        engine.dedupe_group([engine.FullPath(str(self.canonical)), engine.FullPath(str(self.dup))],
+        paths = [engine.FullPath(str(self.canonical)), engine.FullPath(str(self.dup))]
+        engine.dedupe_group(paths, [engine._inspect(p) for p in paths],
                             self.swaps, self.skips, lambda _: None)
         self.swaps.flush()
 
@@ -337,7 +338,8 @@ def main() -> int:
 
         engine._scan_writers = counting
         engine.SETTLE_MAX_SECONDS, saved = 3600.0, engine.SETTLE_MAX_SECONDS
-        engine.dedupe_group([engine.FullPath(str(p)) for p in [f.canonical, *extra]],
+        paths = [engine.FullPath(str(p)) for p in [f.canonical, *extra]]
+        engine.dedupe_group(paths, [engine._inspect(p) for p in paths],
                             f.swaps, f.skips, lambda _: None)
         f.swaps.flush()
         engine.SETTLE_MAX_SECONDS = saved
