@@ -253,6 +253,11 @@ fi
 HERE=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
 APPLY_ENGINE="$HERE/lib/apply.py"
 
+# Clones and displaced files wait here, outside the trees being deduped; see
+# _open_work_dir in lib/apply.py. It sits under the scope so it is on the same
+# volume, which a swap needs.
+WORK_DIR="$SCOPE/.apfsdedupe-work"
+
 REPORT=$(mktemp)
 FCERR=$(mktemp)
 trap 'rm -f "$REPORT" "$FCERR"' EXIT INT TERM
@@ -271,6 +276,9 @@ if [ -z "$INCLUDE_CLOUD" ]; then
         --exclude '**/Library/CloudStorage/**' \
         --exclude '**/*.photoslibrary/**'
 fi
+
+# The apply's own work directory: anything left there is not a duplicate to act on.
+set -- "$@" --exclude '**/.apfsdedupe-work/**'
 
 # Protected, churning, or machine-managed ~/Library data, excluded by default
 # and re-included with --include-app-data. Two classes, same rationale (TCC-
@@ -402,7 +410,7 @@ fi
 # fclones call above, so the positional list is free to reuse for the engine's
 # argv -- quoted, so nothing re-splits.
 set --
-[ -n "$APPLY" ] && set -- "$@" --apply
+[ -n "$APPLY" ] && set -- "$@" --apply --work-dir "$WORK_DIR"
 [ -n "$VERBOSE" ] && set -- "$@" --verbose
 set -- "$@" --scan-seconds "$scan_secs"
 [ -n "$files_scanned" ] && set -- "$@" --files-scanned "$files_scanned"

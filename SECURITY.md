@@ -3,8 +3,10 @@
 `apfs-dedupe` runs as root and rewrites files in place across user home
 directories, so its safety properties are part of its security surface. The
 apply is symlink-safe and anchored to a directory file descriptor, content is
-re-verified against a frozen clone immediately before each atomic swap, and a
-crash leaves the original file untouched. The README "Safety" section and
+re-verified against a frozen clone immediately before each atomic swap, an
+original is deleted only after a scan of every process and a second compare, and a
+crash leaves both versions on disk. Concurrent writers are handled as far as macOS
+allows, and the README states what remains. The README "Safety" section and
 [`docs/architecture.md`](docs/architecture.md) document the full threat model.
 
 ## Supported versions

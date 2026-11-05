@@ -18,11 +18,17 @@ every step is fd-relative rather than path-based:
 
 ```
 dirfd = open(dirname(dup), O_NOFOLLOW_ANY | O_DIRECTORY)  # no symlink in any component
-clonefileat(canonical -> dirfd:tmp, CLONE_NOFOLLOW_ANY)   # tmp = shared extents
+clonefileat(canonical -> work:tmp, CLONE_NOFOLLOW_ANY)    # tmp = shared extents
 compare(tmp, dup)                                         # current bytes still match
-fcopyfile(open(dirfd:dup) -> open(dirfd:tmp), COPYFILE_METADATA)  # dup's own metadata
-renameat(dirfd: tmp -> dup)                               # atomic replace
+fcopyfile(open(dirfd:dup) -> open(work:tmp), COPYFILE_METADATA)   # dup's own metadata
+renameatx_np(work:tmp <-> dirfd:dup, RENAME_SWAP)         # atomic exchange
+scan every process for writers                            # once per batch
+compare(work:tmp, dirfd:dup)                              # the original is unchanged
+unlinkat(work:tmp)                                        # or swap back
 ```
+
+`work` is a private directory under the scan scope. See
+[Concurrent writers](#concurrent-writers) for why the checks follow the swap.
 
 Three properties fall out of this ordering that `fclones dedupe` does not have on
 macOS:
@@ -35,12 +41,12 @@ then deletes the saved-aside copy. Between the rename and the clone the path has
 no file - observable by a concurrent reader, and left that way across a crash in
 that interval (the data is stranded under a temp name).
 
-Cloning into a temp and then `rename(2)`-ing it over the duplicate inverts this:
-the duplicate's path always resolves to either the old file or the new clone,
-never nothing, and a crash before the rename leaves the original completely
-untouched (only an orphaned `.apfsdedupe-*` temp file to sweep). This is strictly safer on both the
-concurrent-reader and crash-recovery axes, and needs no exotic primitive - a plain
-atomic rename suffices (no `renamex_np`/`RENAME_SWAP` required).
+Cloning into a temp and then atomically exchanging it with the duplicate inverts
+this: the duplicate's path always resolves to either the old file or the new clone,
+never nothing, and a crash at any point leaves both versions on disk. This is
+strictly safer on both the concurrent-reader and crash-recovery axes. A plain
+`rename(2)` would be enough for those two. `RENAME_SWAP` is here for the third axis,
+concurrent writers: it keeps the displaced file, so a swap can be verified and undone.
 
 ### 2. Metadata-complete, including ACLs
 
@@ -54,7 +60,7 @@ closes the ACL gap.
 ### 3. Fail-safe
 
 A file that cannot be modified - `uchg` immutable, a deny-write ACL, or plain
-permission denied - makes `clonefileat`/`fcopyfile`/`renameat` error. The engine
+permission denied - makes `clonefileat`/`fcopyfile`/`renameatx_np` error. The engine
 catches per file, logs a warning, removes any temp, and moves on. It never clears
 a flag or overrides an ACL to force a dedup.
 
@@ -81,7 +87,7 @@ symlink - not just `O_NOFOLLOW`, which guards only the final one and would let
 an attacker who owns an ancestor swap an intermediate component to redirect the
 open. (Firmlinks such as `/Users` are not symlinks, so they still resolve.) The
 clone (`clonefileat`), the content re-verify and metadata copy (`openat` +
-`fcopyfile`), the atomic swap (`renameat`), and cleanup (`unlinkat`) all resolve
+`fcopyfile`), the atomic swap (`renameatx_np`), and cleanup (`unlinkat`) all resolve
 names against that fd - the real directory inode - so swapping a path component
 after the fd is open cannot redirect any of them either. The clone itself uses
 `clonefileat` with `CLONE_NOFOLLOW_ANY`, which refuses a symlink in any
@@ -119,11 +125,78 @@ into a temp first - a frozen copy-on-write snapshot - then re-compare *that
 snapshot* against `dup`'s current bytes immediately before the atomic swap
 every time. Cloning first means a write to canonical after the snapshot cannot
 change what we install; comparing right before the swap closes the scan-to-apply
-window, which is seconds to minutes on a large run. The only irreducible residue
-is a write to `dup` itself in the microseconds between the compare and the rename
-- unavoidable on macOS without a kernel-verified dedupe ioctl, and negligible
-beside the window we close. (File locking would not help: it is advisory, so a
-non-cooperating writer ignores it.)
+window, which is seconds to minutes on a large run. That compare cannot be the
+last word, because a write can land after it, which is the next section's subject.
+
+## Concurrent writers
+
+The apply runs as root over live trees, so another process may write to a duplicate
+at any moment. This is closed as far as macOS allows. It is not closed completely,
+and this section says exactly what remains.
+
+**What a compare alone leaves open.** A compare followed by a plain rename has two
+holes. A write or a replacement landing between the two is overwritten with old bytes,
+which matters most for a `git` checkout replacing a tracked file. And a process holding
+the file open across the rename keeps writing to an unlinked inode, for as long as it
+keeps the file open. Under a torture test, a writer timed to hit the gap lost its
+update on about a third of attempts against the compare-and-rename apply. That figure
+measures the test, not normal use, but the loss is real and it is silent.
+
+**Why nothing simpler closes it.** Advisory locks (`flock`, `O_EXLOCK`) bind only
+writers that take them, and `git` does not. `chflags uchg` blocks our own swap too, and
+a descriptor opened before the flag was set writes straight through it. `exchangedata`
+is unsupported on APFS. `F_SETLEASE` would be the right tool, because the kernel makes a
+conflicting writer wait, but it requires the private
+`com.apple.private.vfs.file-leases` entitlement and returns `EPERM` otherwise, root
+included. A process scan before the swap is racy for the same reason a compare is.
+
+**The order that works: swap, then check.** After the swap the original is in the
+private work directory, with no name in the user's tree, so nothing new can open it.
+Anyone still able to write it already holds it, and those holders are visible to
+`libproc`, so a scan taken after the swap cannot go stale. Each pending swap settles
+against one scan:
+
+| Original | Path | Action |
+|---|---|---|
+| Unchanged, no writer, bytes match | Still the clone | Delete the original: success |
+| Written, held, or unverifiable | Still the clone | Swap back |
+| Unchanged, no writer | Written since the swap | Delete the original: the new write stands |
+| Written, held, or unverifiable | Written since the swap | Keep both and warn |
+
+The byte compare runs because a write through a mapping reaches `mtime` late, so ids
+alone can miss it. A run never deletes a file it has not verified.
+
+**Batching.** A scan costs tens of milliseconds from Python, and a first run over a
+large tree can swap millions of files, so one scan per file could add a day. Swaps
+settle in batches instead, bounded in count (each holds a directory fd, and launchd's
+default limit is low) and in time. A batch keeps the unverified window short while
+costing a small fraction of a millisecond per file.
+
+**Writable mappings.** A process can map a file, close the descriptor, and keep
+writing, which a descriptor scan cannot see. Walking every process's memory map takes
+seconds, so it runs at the start and every few minutes, and a duplicate found mapped
+writable is skipped. Private mappings count too: separating them gains little and the
+only cost is leaving an in-use file for another night.
+
+**Blind spots are never silent.** The structs `libproc` returns are parsed by offset,
+and a layout change in a future macOS would make the scan quietly report nothing, so
+every `--apply` first proves the scan can see a real writer and a real mapping, and
+refuses to run if it cannot. As root every process should be readable. One that is not
+is named in the summary with its reason, and every swap in that batch is undone rather
+than trusted. Without root other users' processes cannot be read at all, and refusing
+would make per-user runs useless, so the run proceeds and the summary states the cost.
+
+**What remains.** Each of these can still lose a write:
+
+- A holder the scan cannot see: a descriptor in flight between processes during the
+  scan, or a kernel-side holder such as a mounted disk image.
+- A file mapped writable after the last full scan with its descriptor already closed,
+  if a write through the mapping lands after the byte compare.
+- Any process a non-root run could not inspect.
+
+A reader of the path can also see the pre-write version for a fraction of a second
+before an undo. `--exclude` is the only complete protection, because it keeps a run
+away from a tree entirely.
 
 ## Skipping files already cloned on an earlier run
 

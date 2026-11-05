@@ -64,15 +64,19 @@ mid-apply (see [Safety](#safety) for why):
 
 ```
 dirfd = open(dirname(dup), O_NOFOLLOW_ANY)        # no symlink in any component
-clonefileat(canonical -> dirfd:tmp)               # shared extents; CLONE_NOFOLLOW_ANY
+clonefileat(canonical -> work:tmp)                # shared extents; CLONE_NOFOLLOW_ANY
 compare(tmp, dup)                                  # current bytes still match
 fcopyfile(dup_fd -> tmp_fd, COPYFILE_METADATA)    # dup's mode/owner/times/xattrs/ACLs
-renameat(dirfd: tmp -> dup)                        # atomic: dup's path is never absent
+renameatx_np(work:tmp <-> dirfd:dup, RENAME_SWAP) # atomic: dup's path is never absent
+scan every process for writers                    # after the swap, once per batch
+compare(displaced original, clone)                # nothing changed it
+unlink(work:tmp)                                  # or swap back if anything did
 ```
 
 That `fcopyfile(COPYFILE_METADATA)` is what carries ACLs across; the
-temp-then-atomic-rename removes the window and is crash-safe - a crash leaves the
-original untouched.
+temp-then-atomic-swap removes the window and is crash-safe: a crash leaves both
+versions on disk. `work` is a private directory under the scan scope, so a temp file
+never appears beside your files, where `git status` or a file watcher would see it.
 
 ## Deduping all of /Users, across every user
 
@@ -96,15 +100,18 @@ files can't be modified in any case (they would simply error and be skipped).
 - **Content re-verify against a frozen clone, right before the swap.** `clonefile`
   is not content-verified by the kernel (unlike Linux `FIDEDUPERANGE`), so we clone
   first - a copy-on-write snapshot - then re-compare *that* against the duplicate
-  immediately before replacing. It never installs bytes that went stale since the
-  scan (seconds to minutes earlier on a large run), a concurrent write to the
-  original can't affect the result, and this check is always on.
+  immediately before replacing. It closes the window since the scan (seconds to
+  minutes earlier on a large run), a concurrent write to the original can't affect
+  the result, and this check is always on.
+- **Never deletes what it has not verified.** Each original is kept until a scan of
+  every process finds no writer and a byte compare proves it unchanged. If either
+  fails it goes back where it was. See [Concurrent writers](#concurrent-writers).
 - **Windowless, crash-safe** apply (above).
 - **Symlink-safe, fd-anchored apply.** Running as root over user-writable
   directories, the clone, content re-verify, metadata copy, and atomic swap are
   all done relative to a file descriptor for the duplicate's parent - acquired
   with `O_NOFOLLOW_ANY` (no symlink in any path component) and then used via
-  `clonefileat`/`openat`/`renameat` - so a local user can't swap a path
+  `clonefileat`/`openat`/`renameatx_np` - so a local user can't swap a path
   component to redirect a root clone into an arbitrary location.
 - **Fails safe.** Immutable (`uchg`), deny-ACL, or permission-denied files are
   skipped with a warning, never forced.
@@ -132,6 +139,50 @@ files can't be modified in any case (they would simply error and be skipped).
   TCC-protected user folders (Desktop/Documents/Downloads) stay in scope but are
   reachable only with **Full Disk Access** - grant it to your terminal for an
   interactive run; a scheduled run via `/bin/sh` cannot get it (see [Usage](#usage)).
+
+### Concurrent writers
+
+**`--apply` is built to run over live trees, and this protection is as strong as we
+can make it on macOS, but it is not perfect.** macOS has no kernel-verified
+compare-and-replace like Linux's `FIDEDUPERANGE`, file locks are advisory so a writer
+that does not take them is not stopped, and the kernel's file leases are private to
+Apple. So the risk is reduced as far as public APIs allow, not removed.
+
+What the apply does:
+
+- Skips any file a process already holds open for writing or has mapped writable.
+- Swaps first and checks afterwards. Once swapped, the original has no name in your
+  tree, so no new writer can reach it, and any writer left is one a scan can see.
+- Deletes the original only if that scan finds no writer and its bytes still match.
+  Otherwise it is swapped back and your file is exactly as it was.
+- Refuses to run if it cannot prove, on your macOS version, that the scan works.
+
+What can still go wrong:
+
+- **A writer the scan cannot see.** A descriptor passed between processes while the
+  scan runs, or a kernel-side holder such as a mounted disk image. A write through
+  either after the swap is lost.
+- **A file mapped writable, with its descriptor closed, after the last full scan.**
+  Open descriptors are checked for every batch, but walking memory maps takes seconds,
+  so that runs every few minutes. A write through such a mapping after the swap is
+  lost if the byte compare has already passed.
+- **Running without root.** Other users' and system processes cannot be inspected, so
+  their writes are not detected. The summary says so. Use `sudo` for the full check.
+- **Reads during a swap.** For a fraction of a second a reader of the path can see the
+  version from before a concurrent write, until that swap is undone.
+
+Two outcomes need your attention, and the run reports both:
+
+- **`warning: ... Check <path>`**: two writers changed a file from both sides of a
+  swap. Neither version is deleted; one stays in the work directory
+  (`<scope>/.apfsdedupe-work`) for you to compare. A file left there by a crash is
+  kept and reported the same way.
+- **`warning: running as root, but N process(es) could not be checked`**: this should
+  not happen. The run names each process and why, and restores anything it could not
+  verify, so nothing is lost and it reclaims less. Please report it.
+
+`--exclude` is the only complete protection for a tree: a file a run does not touch
+cannot be affected. For most trees that should not be necessary.
 
 ## Requirements
 
@@ -302,8 +353,9 @@ adversarial multi-user machines.
 
 **Leaving a tree alone** - `--exclude GLOB` (either mode, repeatable) is written
 into the job and passed to the CLI's own `--exclude`, on top of the defaults above.
-Use it for a tree another process may be reading while a scheduled run is still
-going. A clone replaces each duplicate with a new inode and a fresh ctime, keeping
+It is the one complete protection against [concurrent writers](#concurrent-writers),
+and the fix for a tree another process reads while a scheduled run is still going. A
+clone replaces each duplicate with a new inode and a fresh ctime, keeping
 its bytes, mtime, and the rest of its metadata, so a tool that compares inode or
 ctime to spot edits reads every replaced file as edited. Bazel is one: its
 `--guard_against_concurrent_changes` check refuses to upload an action's result
