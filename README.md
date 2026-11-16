@@ -372,9 +372,12 @@ Exclude such a tool's working trees, for example a CI runner's checkouts.
 
 ```sh
 sh test/test.sh                              # integration tests (macOS 15+, real clonefile, fclones)
-npx pyright@1.1.409                          # strict type check of lib/apply.py (CI's exact pin)
-shellcheck apfs-dedupe.sh install-daily.sh test/test.sh   # CI pins shellcheck 0.11.0
+npx pyright@<version>                        # strict type check of lib/apply.py
+shellcheck apfs-dedupe.sh install-daily.sh test/test.sh
 ```
+
+CI pins the pyright and shellcheck releases in `.github/workflows/ci.yml`; use
+the same ones, since another release can report differently.
 
 `lib/apply.py` brands path strings as `FullPath` vs `Basename` (distinct
 `NewType`s), so a directory-relative component can't be passed - or logged - where
