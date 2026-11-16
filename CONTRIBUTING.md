@@ -19,7 +19,7 @@ These are the same three checks CI runs on every push and PR (see the README
 
 ```sh
 sh test/test.sh                              # integration tests - macOS 15+, real clonefile + fclones
-npx pyright@1.1.409                          # strict type check of lib/apply.py (CI's exact pin)
+npx pyright@<version>                        # strict type check of lib/apply.py (the release ci.yml pins)
 shellcheck apfs-dedupe.sh install-daily.sh test/test.sh
 ```
 
@@ -40,7 +40,9 @@ check and shellcheck run anywhere.
   resolver cannot silently move them. Match that when adding any. The one
   exception is `dtolnay/rust-toolchain@stable` in CI: it is a toolchain selector
   rather than a version-pinned action, and the tool it builds - `fclones` - is
-  itself pinned (`cargo install fclones --version 0.35.0 --locked`).
+  itself pinned (`cargo install fclones --version <version> --locked`). Renovate
+  proposes updates to these pins; the `# renovate:` comment above an inline pin
+  tells it what the literal is, so a new inline pin needs one.
 - **Comments explain _why_, not _what_.** `lib/apply.py` brands path strings as
   `FullPath` vs `Basename` (`NewType`s that pyright enforces in strict mode) so a
   directory-relative component cannot be passed where a resolvable path belongs;
