@@ -35,7 +35,7 @@ jobs:
       - uses: actions/setup-node@v7.1.0
         with:
           # renovate: datasource=node-version depName=node
-          node-version: 24.22.1
+          node-version: 24.22.2
       - name: pyright (strict)
         # renovate: datasource=npm depName=pyright
         run: npx --yes pyright@1.1.414
