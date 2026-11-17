@@ -199,6 +199,8 @@ def test_walk(root: Path) -> None:
     check("walk: fclones reaches exactly the files not withheld",
           reach == all_files(d) - withheld, str(sorted(reach ^ (all_files(d) - withheld))))
     check("walk: the set's first file is offered", bool(sets) and sets[0][0] in reach)
+    check("walk: the file offered is the set's lowest inode, as fclones orders a group",
+          bool(sets) and sets[0][0] == min(members, key=lambda p: os.lstat(p).st_ino))
     check("walk: a subtree holding nothing withheld is offered as one directory",
           str(d / "other") in offered and not any(p.startswith(str(d / "other") + "/") for p in offered),
           str(offered))

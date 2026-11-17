@@ -152,6 +152,7 @@ class Entry(NamedTuple):
     name: bytes
     objtype: Optional[int]
     dev: int
+    ino: int
     flags: int
     mounted_on: bool
     nlink: int
@@ -162,7 +163,7 @@ class Entry(NamedTuple):
 
 def _parse_entry(buf: memoryview, base: int) -> Entry:
     (length, common, _vol, dirs, files, ext, err, name_off, name_len, dev, objtype, flags,
-     _fileid) = _HEAD.unpack_from(buf, base)
+     fileid) = _HEAD.unpack_from(buf, base)
     start = base + _NAME_REF + name_off
     name = bytes(buf[start:start + name_len]).split(b"\0", 1)[0]
     known = bool(common & ATTR_CMN_OBJTYPE) and not (common & ATTR_CMN_ERROR and err)
@@ -179,12 +180,12 @@ def _parse_entry(buf: memoryview, base: int) -> Entry:
         mstatus, cid, refcnt = _DIR_TAIL.unpack_from(buf, base + _HEAD.size)
         mounted_on = bool(dirs & ATTR_DIR_MOUNTSTATUS and mstatus & DIR_MNTSTATUS_MNTPOINT)
     else:
-        return Entry(name, None, dev, flags, False, 0, -1, None, None)
+        return Entry(name, None, dev, fileid, flags, False, 0, -1, None, None)
     if ext & ATTR_CMNEXT_CLONEID:
         clone_id = cid
     if ext & ATTR_CMNEXT_CLONE_REFCNT:
         clone_refcnt = refcnt
-    return Entry(name, objtype if known else None, dev, flags, mounted_on, nlink, size,
+    return Entry(name, objtype if known else None, dev, fileid, flags, mounted_on, nlink, size,
                  clone_id, clone_refcnt)
 
 
@@ -382,8 +383,8 @@ class Walk:
         self.prune = _Prune(excludes)
         self.might_exclude = _MightExclude(excludes)
         self.scope_dev = os.lstat(self.scope).st_dev
-        # (dev, clone id, size) -> files sharing that data stream, in walk order.
-        self.clones: dict[tuple[int, int, int], list[str]] = {}
+        # (dev, clone id, size) -> (inode, path) of the files sharing that stream.
+        self.clones: dict[tuple[int, int, int], list[tuple[int, str]]] = {}
         self.listed: dict[str, _Listed] = {}
 
     def _candidate(self, path: str, e: Entry) -> bool:
@@ -405,9 +406,7 @@ class Walk:
                 if d == self.scope or len(d) <= len(self.scope):
                     break
                 d = os.path.dirname(d)
-        for paths in self.clones.values():
-            paths.sort()        # the path offered does not depend on thread timing
-        offered_clones = {p for paths in self.clones.values() for p in paths} - withheld
+        offered_clones = {p for files in self.clones.values() for _ino, p in files} - withheld
         if self.scope not in split:
             out(self.scope)     # nothing withheld: fclones walks the whole scope
             return
@@ -493,7 +492,7 @@ class Walk:
             elif e.objtype == VREG:
                 if self._candidate(path, e):
                     assert e.clone_id is not None
-                    self.clones.setdefault((e.dev, e.clone_id, e.size), []).append(path)
+                    self.clones.setdefault((e.dev, e.clone_id, e.size), []).append((e.ino, path))
                 else:
                     offer.append(name)
             # symlinks and special files: fclones skips them without -L/-S
@@ -501,10 +500,13 @@ class Walk:
         return to_list
 
     def sets(self) -> Iterator[tuple[int, list[str]]]:
-        """(size, files) for each withheld set; files[0] went to fclones."""
-        for (_dev, _cid, size), paths in self.clones.items():
-            if len(paths) >= 2:
-                yield size, paths
+        """(size, files) for each withheld set; files[0] went to fclones. That is
+        the set's lowest inode: fclones orders a group by inode and the apply
+        clones from the first, so the group keeps the canonical it would have had
+        with every file hashed, and the plan does not depend on the prefilter."""
+        for (_dev, _cid, size), files in self.clones.items():
+            if len(files) >= 2:
+                yield size, [p for _ino, p in sorted(files)]
 
 
 def check(scope: str, min_text: str) -> Optional[str]:
