@@ -327,18 +327,23 @@ On `--stdin` input `fclones` also drops a file whose path plus `/` an exclude en
 in `**` matches, so a file named, say, `target` under `--exclude '**/target/**'`
 is left out of the scan; that only skips a file.
 
+`fclones` is given directories wherever it can be: a directory whose subtree holds
+no withheld file goes as the directory, which `fclones` walks as it always did,
+and only the directories on the way to a withheld file are split into their files
+and subdirectories. Each path `fclones` reads on `--stdin` costs it two `stat`
+calls on one thread, so a list of every file was slower than the hashing it saved
+(about a minute for a million paths). When nothing is withheld the prefilter
+writes no list at all and the scan is the plain `fclones` walk.
+
 What the prefilter cannot list or describe it hands to `fclones` as a directory,
 which `fclones` walks itself as before: a directory it cannot open (so the
 permission note is unchanged), one holding a name a line of `--stdin` cannot carry
 (a newline or carriage return, or a name that is not UTF-8), and a dataless one.
-If it cannot run at all (`--check`: an unreadable `--min` or scope) the scan is the
-plain `fclones` walk, and if it fails partway the run stops before the apply, since
-the report would be missing files. The file list goes to `fclones` through a pipe,
-not a file: for a million files it is a couple of hundred megabytes.
+If it cannot run at all (status 3: an unreadable `--min` or scope) or fails, the
+scan is the plain `fclones` walk.
 
 The listing runs on the apply's thread count (one per efficiency core), since it
-waits on the disk. Its cost is roughly the `fclones` walk it replaces plus the
-clone attributes; what it saves is the reading of every withheld file.
+waits on the disk. What it saves is the reading of every withheld file.
 
 ## Reclaim accounting
 

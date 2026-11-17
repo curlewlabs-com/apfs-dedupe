@@ -159,32 +159,59 @@ def test_decoding(root: Path) -> None:
 
 
 def walk(scope: Path, min_size: int = 1, excludes: Optional[list[str]] = None
-         ) -> tuple[list[str], list[list[str]]]:
+         ) -> tuple[list[str], list[list[str]], set[str]]:
+    """What the prefilter offers fclones, its withheld sets, and every file fclones
+    reaches from what it was offered (a directory is walked whole)."""
     w = prefilter.Walk(str(scope), min_size, excludes or [])
     offered: list[str] = []
     w.run(offered.append, 2)
-    return offered, [files for _size, files in w.sets()]
+    reach: set[str] = set()
+    for p in offered:
+        if os.path.isdir(p) and not os.path.islink(p):
+            for d, _dirs, files in os.walk(p):
+                reach.update(os.path.join(d, f) for f in files
+                             if not os.path.islink(os.path.join(d, f)))
+        else:
+            reach.add(p)
+    return offered, [files for _size, files in w.sets()], reach
+
+
+def all_files(scope: Path) -> set[str]:
+    return {os.path.join(d, f) for d, _dirs, files in os.walk(scope) for f in files
+            if not os.path.islink(os.path.join(d, f))}
 
 
 def test_walk(root: Path) -> None:
     d = root / "walk"
-    d.mkdir()
+    (d / "deep" / "er").mkdir(parents=True)
+    (d / "other" / "x").mkdir(parents=True)
     body = os.urandom(65536)
     (d / "a").write_bytes(body)
-    clone(d / "a", d / "b")
-    clone(d / "a", d / "c")
+    clone(d / "a", d / "deep" / "er" / "b")
+    clone(d / "a", d / "deep" / "c")
     (d / "plain").write_bytes(body)
-    offered, sets = walk(d)
-    check("walk: a clone set is one set", len(sets) == 1 and sorted(sets[0]) ==
-          sorted(str(d / n) for n in "abc"), str(sets))
-    check("walk: only the set's first file is offered to fclones",
-          [p for p in offered if p.startswith(str(d / "a")) or p in (str(d / "b"), str(d / "c"))]
-          == [sets[0][0]] if sets else False, str(offered))
-    check("walk: a plain copy is offered", str(d / "plain") in offered)
+    (d / "deep" / "er" / "sibling").write_bytes(b"s")
+    (d / "other" / "x" / "y").write_bytes(b"y")
+    offered, sets, reach = walk(d)
+    members = sorted(str(p) for p in (d / "a", d / "deep" / "er" / "b", d / "deep" / "c"))
+    check("walk: a clone set is one set", len(sets) == 1 and sorted(sets[0]) == members, str(sets))
+    withheld = set(sets[0][1:]) if sets else set()
+    check("walk: fclones reaches exactly the files not withheld",
+          reach == all_files(d) - withheld, str(sorted(reach ^ (all_files(d) - withheld))))
+    check("walk: the set's first file is offered", bool(sets) and sets[0][0] in reach)
+    check("walk: a subtree holding nothing withheld is offered as one directory",
+          str(d / "other") in offered and not any(p.startswith(str(d / "other") + "/") for p in offered),
+          str(offered))
+    nothing, sets2, reach2 = walk(d / "other")
+    check("walk: a scope holding nothing withheld is offered as itself",
+          nothing == [str(d / "other")] and not sets2 and reach2 == all_files(d / "other"), str(nothing))
 
-    # Each of these has a clone, and must still be hashed.
+    # Each of these has a clone, and must still be hashed. One real set keeps
+    # the scope split, so the cases are offered on their own.
     cases = root / "cases"
     cases.mkdir()
+    (cases / "set1").write_bytes(body + b"1")
+    clone(cases / "set1", cases / "set2")
     (cases / "small").write_bytes(b"tiny")
     clone(cases / "small", cases / "small2")
     (cases / "hard").write_bytes(body)
@@ -203,22 +230,21 @@ def test_walk(root: Path) -> None:
     (cases / "locked" / "l").write_bytes(b"l")
     os.chmod(cases / "locked", 0)
     try:
-        offered, sets = walk(cases, min_size=100, excludes=["**/ex/**"])
+        offered, sets, reach = walk(cases, min_size=100, excludes=["**/ex/**"])
     finally:
         os.chmod(cases / "locked", 0o755)
-    flat = {p for s in sets for p in s}
-    check("walk: a clone below --min is hashed", str(cases / "small2") in offered and
-          str(cases / "small") in offered)
-    check("walk: a hard-linked clone is hashed", str(cases / "hard2") in offered and
-          str(cases / "hard3") in offered and str(cases / "hard") in offered)
-    check("walk: a file under a pruned exclude is not listed",
-          str(cases / "ex" / "keep2") not in offered and str(cases / "ex" / "keep2") not in flat)
-    check("walk: a clone whose twin is excluded is hashed", str(cases / "keep") in offered)
+    check("walk: the control set is withheld",
+          [sorted(s) for s in sets] == [[str(cases / "set1"), str(cases / "set2")]], str(sets))
+    check("walk: a clone below --min is hashed", {str(cases / "small"), str(cases / "small2")} <= reach)
+    check("walk: a hard-linked clone is hashed",
+          {str(cases / n) for n in ("hard", "hard2", "hard3")} <= reach)
+    check("walk: a pruned exclude is not offered",
+          not any(p.startswith(str(cases / "ex")) for p in offered), str(offered))
+    check("walk: a clone whose twin is excluded is hashed", str(cases / "keep") in reach)
     check("walk: a directory holding a name stdin cannot carry goes to fclones whole",
           str(odd) in offered and not any(p.startswith(str(odd) + "/") for p in offered))
     check("walk: an unreadable directory goes to fclones, which reports it",
           str(cases / "locked") in offered)
-    check("walk: nothing in these cases is withheld", not sets, str(sets))
 
     # A compressed clone set is hashed: decmpfs keeps the bytes outside the stream.
     comp = root / "compressed"
@@ -227,9 +253,9 @@ def test_walk(root: Path) -> None:
     subprocess.run(["ditto", "--hfsCompression", str(comp / "src"), str(comp / "z")], check=True)
     clone(comp / "z", comp / "z2")
     compressed = bool(os.lstat(comp / "z").st_flags & prefilter.UF_COMPRESSED)
-    offered, sets = walk(comp)
+    offered, sets, reach = walk(comp)
     check("walk: a compressed clone set is hashed",
-          not compressed or (str(comp / "z") in offered and str(comp / "z2") in offered and not sets),
+          not compressed or ({str(comp / "z"), str(comp / "z2")} <= reach and not sets),
           f"compressed={compressed} sets={sets}")
 
 

@@ -42,10 +42,10 @@ cannot describe safely on stdin (a name with a newline, a name that is not
 UTF-8), is offered to fclones as a directory, which fclones walks itself, so its
 errors and its results are what they were without the prefilter.
 
-Output: fclones' input on stdout, one path per line; the withheld sets as JSON in
---shared-out. --check exits 0 if the prefilter can run with these arguments and
-3 (with the reason on stderr) if the wrapper should fall back to a plain fclones
-walk.
+Output: fclones' input on stdout, one path per line, and the withheld sets as
+JSON in --shared-out. When nothing is withheld stdout is empty and the wrapper
+runs the plain fclones walk. Exit status 3 (the reason on stderr) means the
+prefilter cannot run with these arguments and the wrapper should do the same.
 
 macOS / APFS only. See docs/architecture.md "Re-runs: hashing only what changed".
 """
@@ -61,8 +61,12 @@ import re
 import struct
 import sys
 import threading
-from apply import inspect_workers
 from typing import IO, Callable, Iterator, NamedTuple, Optional, Sequence, Union, cast
+
+# The apply engine sits beside this file; import it from there whatever the
+# interpreter's path (python3 -I leaves the script's directory off it).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from apply import inspect_workers  # noqa: E402
 
 FALLBACK = 3
 
@@ -354,17 +358,33 @@ def _describable(name: bytes) -> Optional[str]:
         return None
 
 
+class _Listed(NamedTuple):
+    """What the walk keeps of a listed directory to offer it to fclones later:
+    the names to offer one by one if it has to be split, and its subdirectories
+    (pruned and other-volume ones left out)."""
+    offer: list[str]
+    subdirs: list[str]
+
+
 class Walk:
-    """The scope's files split into fclones' input and the withheld clone sets."""
+    """The scope's files split into fclones' input and the withheld clone sets.
+
+    Two passes. The first lists every directory and records the clone candidates.
+    The second offers fclones as few paths as it can: a directory whose subtree
+    holds no withheld file goes as the directory, which fclones walks itself (its
+    own walk is parallel and does one stat per entry, while each path read from
+    stdin costs it two, serially); only the directories on the way to a withheld
+    file are split into their files and subdirectories."""
 
     def __init__(self, scope: str, min_size: int, excludes: Sequence[str]) -> None:
-        self.scope = scope
+        self.scope = scope.rstrip("/") or "/"
         self.min_size = max(1, min_size)
         self.prune = _Prune(excludes)
         self.might_exclude = _MightExclude(excludes)
-        self.scope_dev = os.lstat(scope).st_dev
+        self.scope_dev = os.lstat(self.scope).st_dev
         # (dev, clone id, size) -> files sharing that data stream, in walk order.
         self.clones: dict[tuple[int, int, int], list[str]] = {}
+        self.listed: dict[str, _Listed] = {}
 
     def _candidate(self, path: str, e: Entry) -> bool:
         return (e.clone_id is not None and e.clone_id != 0 and e.clone_refcnt is not None
@@ -373,12 +393,47 @@ class Walk:
                 and not self.might_exclude.matches(path))
 
     def run(self, out: Callable[[str], None], workers: int = 1) -> None:
-        """Offer every input to out, except the clone sets, held back for sets().
+        """Offer fclones its input through out, holding back the clone sets for
+        sets()."""
+        self._list_all(workers)
+        withheld = {p for _size, files in self.sets() for p in files[1:]}
+        split: set[str] = set()
+        for p in withheld:
+            d = os.path.dirname(p)
+            while d not in split:
+                split.add(d)
+                if d == self.scope or len(d) <= len(self.scope):
+                    break
+                d = os.path.dirname(d)
+        for paths in self.clones.values():
+            paths.sort()        # the path offered does not depend on thread timing
+        offered_clones = {p for paths in self.clones.values() for p in paths} - withheld
+        if self.scope not in split:
+            out(self.scope)     # nothing withheld: fclones walks the whole scope
+            return
+        stack = [self.scope]
+        while stack:
+            d = stack.pop()
+            listed = self.listed[d]
+            prefix = d if d.endswith("/") else d + "/"
+            for name in listed.offer:
+                out(prefix + name)
+            for name in listed.subdirs:
+                sub = prefix + name
+                if sub in split:
+                    stack.append(sub)
+                else:
+                    out(sub)    # holds nothing withheld: fclones walks it
+        for p in sorted(offered_clones):
+            if os.path.dirname(p) in split:
+                out(p)          # elsewhere it is under a directory already offered
+
+    def _list_all(self, workers: int) -> None:
+        """List every directory under the scope into self.listed and self.clones.
         Directories are listed on worker threads, since listing waits on the disk
-        and getattrlistbulk releases the GIL; everything else, out() included, runs
-        on this thread. Plain queues rather than futures: waiting on a set of
-        futures rescans the whole set, which is quadratic over a tree's
-        directories."""
+        and getattrlistbulk releases the GIL; the bookkeeping stays on this thread.
+        Plain queues rather than futures: waiting on a set of futures rescans the
+        whole set, which is quadratic over a tree's directories."""
         todo: "queue.SimpleQueue[Optional[str]]" = queue.SimpleQueue()
         done: "queue.SimpleQueue[tuple[str, Union[list[Entry], OSError]]]" = queue.SimpleQueue()
 
@@ -401,52 +456,49 @@ class Walk:
             while outstanding:
                 d, listed = done.get()
                 outstanding -= 1
-                for sub in self._visit(d, listed, out):
+                for sub in self._visit(d, listed):
                     todo.put(sub)
                     outstanding += 1
         finally:
             for _ in threads:
                 todo.put(None)
-        for paths in self.clones.values():
-            paths.sort()        # the path offered does not depend on thread timing
-            out(paths[0])
 
-    def _visit(self, d: str, listed: "Union[list[Entry], OSError]",
-               out: Callable[[str], None]) -> list[str]:
-        """Sort one listed directory's entries into out() and the clone sets;
-        return the subdirectories to list."""
+    def _visit(self, d: str, listed: "Union[list[Entry], OSError]") -> list[str]:
+        """Record one listed directory; return the subdirectories to list. A
+        directory that cannot be listed, or holds a name a line of stdin cannot
+        carry, is not recorded: nothing under it is withheld, so it is offered
+        whole and fclones lists it (and reports why it cannot)."""
         if isinstance(listed, OSError):
-            out(d)              # fclones lists it, and reports why it cannot
             return []
-        entries = listed
-        names = [_describable(e.name) for e in entries]
+        names = [_describable(e.name) for e in listed]
         if any(n is None for n in names):
-            out(d)              # fclones walks it; nothing in it is withheld
             return []
+        offer: list[str] = []
         subdirs: list[str] = []
+        to_list: list[str] = []
         prefix = d if d.endswith("/") else d + "/"
-        for e, name in zip(entries, names):
+        for e, name in zip(listed, names):
             assert name is not None
             path = prefix + name
             if e.objtype is None:
-                out(path)       # unknown: fclones decides what it is
+                offer.append(name)          # unknown: fclones decides what it is
             elif e.objtype == VDIR:
                 if e.mounted_on or e.dev != self.scope_dev:
-                    continue                    # --one-fs
+                    continue                # --one-fs
                 if self.prune.matches(path):
                     continue
-                if e.flags & SF_DATALESS:
-                    out(path)                   # as before: fclones' call
-                    continue
-                subdirs.append(path)
+                subdirs.append(name)
+                if not e.flags & SF_DATALESS:
+                    to_list.append(path)    # a dataless one is fclones' call, as before
             elif e.objtype == VREG:
                 if self._candidate(path, e):
                     assert e.clone_id is not None
                     self.clones.setdefault((e.dev, e.clone_id, e.size), []).append(path)
                 else:
-                    out(path)
+                    offer.append(name)
             # symlinks and special files: fclones skips them without -L/-S
-        return subdirs
+        self.listed[d] = _Listed(offer, subdirs)
+        return to_list
 
     def sets(self) -> Iterator[tuple[int, list[str]]]:
         """(size, files) for each withheld set; files[0] went to fclones."""
@@ -471,8 +523,6 @@ def main(argv: Optional[Sequence[str]] = None, stdout: IO[str] = sys.stdout) -> 
     p.add_argument("--scope", required=True)
     p.add_argument("--min", required=True)
     p.add_argument("--exclude", action="append", default=[])
-    p.add_argument("--check", action="store_true",
-                   help="exit 0 if the prefilter can run, 3 (reason on stderr) if not")
     p.add_argument("--shared-out", help="where to write the withheld clone sets (JSON)")
     # Listing waits on the disk, so threads overlap the waits; the count is the
     # apply's (one per efficiency core), for the same reason: a scheduled run is a
@@ -484,24 +534,18 @@ def main(argv: Optional[Sequence[str]] = None, stdout: IO[str] = sys.stdout) -> 
     if reason is not None:
         print(f"prefilter: {reason}; hashing every file", file=sys.stderr)
         return FALLBACK
-    if args.check:
-        return 0
     if not args.shared_out:
         p.error("--shared-out is required")
     min_size = parse_min(args.min)
     assert min_size is not None
     walk = Walk(args.scope, min_size, args.exclude)
 
-    def out(path: str) -> None:
-        stdout.write(path + "\n")
-
-    try:
-        walk.run(out, args.workers or inspect_workers())
-        stdout.flush()
-    except BrokenPipeError:
-        print("prefilter: fclones stopped reading its input", file=sys.stderr)
-        return 1
+    offered: list[str] = []
+    walk.run(offered.append, args.workers or inspect_workers())
     sets = list(walk.sets())
+    if sets:
+        stdout.writelines(p + "\n" for p in offered)
+        stdout.flush()
     report = {
         "withheld": sum(len(files) - 1 for _size, files in sets),
         "groups": [{"file_len": size, "files": files} for size, files in sets],

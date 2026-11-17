@@ -275,13 +275,11 @@ WORK_DIR="$SCOPE/.apfsdedupe-work"
 
 REPORT=$(mktemp)
 FCERR=$(mktemp)
-# The prefilter's side: its stderr, its withheld clone sets, and the pipe that
-# carries its file list to fclones without writing it to disk (a list for a
-# million files is a couple of hundred MB).
+# The prefilter's side: its stderr, its withheld clone sets, and fclones' input.
 PFERR=$(mktemp)
 SHARED=$(mktemp)
-PIPE_DIR=$(mktemp -d)
-trap 'rm -f "$REPORT" "$FCERR" "$PFERR" "$SHARED"; rm -rf "$PIPE_DIR"' EXIT INT TERM
+ROOTS=$(mktemp)
+trap 'rm -f "$REPORT" "$FCERR" "$PFERR" "$SHARED" "$ROOTS"' EXIT INT TERM
 
 # Cloud-backed files (iCloud Drive, third-party File Providers, Photos library
 # originals) can be "dataless" -- evicted to the cloud, holding no local bytes.
@@ -387,24 +385,29 @@ fclones_group() {
     fi
 }
 
-# The prefilter (lib/prefilter.py) lists the scope itself and gives fclones its
-# files on stdin, holding back all but one file of each set that already shares
-# one data stream -- the clones an earlier run made -- so a re-run does not hash
-# them again. It reads the same --exclude arguments, and fclones still applies
-# every filter to what it is given. If it cannot run here (--check says why) the
+# The prefilter (lib/prefilter.py) lists the scope first and holds back all but
+# one file of each set that already shares one data stream -- the clones an
+# earlier run made -- so a re-run does not hash them again. It gives fclones the
+# rest on stdin: the directories holding nothing withheld, which fclones walks as
+# usual, and the files of the few that do. It reads the same --exclude arguments,
+# and fclones still applies every filter to what it is given. When nothing is
+# withheld, or the prefilter cannot run here (status 3, reason on stderr), the
 # scan is the plain fclones walk.
 rc=0
 prc=0
 USE_SHARED=""
 scan_start=$(date +%s)
-if [ -n "$PREFILTER" ] && python3 "$PREFILTER_ENGINE" --check --scope "$SCOPE" --min "$MIN" "$@" 2>"$PFERR"; then
-    USE_SHARED=1
-    mkfifo "$PIPE_DIR/paths"
+if [ -n "$PREFILTER" ]; then
     python3 "$PREFILTER_ENGINE" --scope "$SCOPE" --min "$MIN" --shared-out "$SHARED" "$@" \
-        >"$PIPE_DIR/paths" 2>"$PFERR" &
-    pf_pid=$!
-    fclones_group "$@" --stdin <"$PIPE_DIR/paths" >"$REPORT" 2>"$FCERR" || rc=$?
-    wait "$pf_pid" || prc=$?
+        >"$ROOTS" 2>"$PFERR" || prc=$?
+    if [ "$prc" -eq 0 ] && [ -s "$ROOTS" ]; then
+        USE_SHARED=1
+    elif [ "$prc" -ne 0 ] && [ "$prc" -ne 3 ]; then
+        echo "warning: the prefilter failed (status $prc); hashing every file." >&2
+    fi
+fi
+if [ -n "$USE_SHARED" ]; then
+    fclones_group "$@" --stdin <"$ROOTS" >"$REPORT" 2>"$FCERR" || rc=$?
 else
     fclones_group "$@" "$SCOPE" >"$REPORT" 2>"$FCERR" || rc=$?
 fi
@@ -436,12 +439,6 @@ fi
 if [ "$rc" -ne 0 ]; then
     echo "error: fclones exited with status $rc" >&2
     exit "$rc"
-fi
-# fclones saw only what the prefilter gave it before it stopped, so the report may
-# be missing files; act on none of it.
-if [ "$prc" -ne 0 ]; then
-    echo "error: the prefilter exited with status $prc; nothing was changed." >&2
-    exit "$prc"
 fi
 
 # Files fclones actually considered (after the --min filter), read best-effort

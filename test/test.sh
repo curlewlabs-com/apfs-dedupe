@@ -1052,13 +1052,19 @@ PATH="$d/bin:$PATH" "$SCRIPT" --scope "$s" --min 1 --apply >/dev/null 2>&1
 if [ "$(ino "$s/plain")" != "$ip" ] && cmp -s "$s/a" "$s/plain"; then pass "prefilter: --apply clones the plain copy"; else fail "prefilter: --apply did not clone the plain copy"; fi
 assert_eq "prefilter: --apply leaves the existing clones alone" "$(ino "$s/a") $(ino "$s/b") $(ino "$s/x/c")" "$ia $ib $ic"
 
+# With nothing to hold back the scan is the plain fclones walk, exactly as before.
+d5="$WORK/prefilter-none"; mkdir -p "$d5"
+head -c 4096 /dev/urandom > "$d5/a"; cp "$d5/a" "$d5/b"
+PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d5" --min 1 >/dev/null 2>&1
+if grep -qxF -- '--stdin' "$d/argv"; then fail "prefilter: a scope with no clones was not the plain walk"; else pass "prefilter: a scope with no clones is the plain fclones walk"; fi
+
 # A clone that has since been written, even with the same bytes, has its own data
 # stream again, so it must be hashed, and re-cloned to share its blocks again.
 d2="$WORK/prefilter-diverged"; mkdir -p "$d2"
 head -c 65536 /dev/urandom > "$d2/a"; cp -c "$d2/a" "$d2/b"
 dd if="$d2/a" of="$d2/b" bs=4096 skip=3 seek=3 count=1 conv=notrunc 2>/dev/null
 out=$(PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d2" --min 1 2>/dev/null)
-if grep -qxF "$d2/b" "$d/stdin" && grep -qxF "$d2/a" "$d/stdin"; then pass "prefilter: a rewritten clone is hashed"; else fail "prefilter: a rewritten clone was withheld"; fi
+if ! grep -qxF -- '--stdin' "$d/argv"; then pass "prefilter: a rewritten clone is hashed (nothing withheld, plain walk)"; else fail "prefilter: a rewritten clone was withheld"; fi
 case "$out" in
     *"would clone "*) pass "prefilter: a rewritten clone is planned to share again" ;;
     *) fail "prefilter: rewritten clone not planned (got: $out)" ;;
