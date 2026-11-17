@@ -265,6 +265,81 @@ The space the recognized clones represent is reported on its own line -
 saved, recomputed from the filesystem each scan rather than tracked in any state
 file.
 
+## Re-runs: hashing only what changed
+
+The extent-map check above keeps a re-run from re-cloning anything, but it runs
+after `fclones`, and `fclones` reads every byte of every candidate to hash it. On a
+tree an earlier run deduped, almost all of that reading is of files the apply then
+leaves alone. Two things cut it.
+
+**fclones' hash cache (`--cache`, on by default; `--no-cache` turns it off).**
+`fclones` stores each hash it computes under its cache directory
+(`~/Library/Caches/fclones`; `/var/root/Library/Caches/fclones` for the root
+daemon), keyed by device and inode and validated by size and modification time,
+and does not read a file again while those match. The apply swaps in a new inode,
+so a file it cloned is hashed once more on the next run and then comes from the
+cache. A stale entry (a file changed without its mtime moving) can only put a
+file in the wrong group; the apply compares the bytes before it changes anything,
+so the cost is a skipped file, and a dry-run could list it. `fclones` never prunes
+the cache, so it grows with every file it has seen; deleting the directory resets it.
+
+**The prefilter (`lib/prefilter.py`; `--no-prefilter` turns it off).** Before
+`fclones` runs, the wrapper lists the scope with `getattrlistbulk(2)`, which
+returns a directory's metadata in a few calls without reading any file, and reads
+each file's clone id (`ATTR_CMNEXT_CLONEID`) and clone count
+(`ATTR_CMNEXT_CLONE_REFCNT`). The clone id names the data stream a file's extents
+belong to. `clonefile(2)` gives the clone its source's stream, and any change to
+either file moves the changed one to a new stream: `test/test_prefilter.py` checks
+a block rewritten with the same bytes or other bytes, an append, a truncate and
+regrow, an extend with a hole, a write through a mapping, and a punched hole, on
+both the clone and the source. So regular files of the same size with the same
+clone id on one device read the same extents, and their bytes are equal without
+being read; `getattrlist(2)` documents the id for exactly this ("files that are
+pure clones of each other"). The prefilter gives `fclones` one file of each such
+set and holds the rest back; the engine (`merge_shared`) adds them to the group
+that file lands in, or makes them a group of their own. They then go through
+`dedupe_group` like any other duplicate: mapped, and in `--apply` byte-compared
+before any change. So a wrong grouping could only make the dry-run plan wrong or
+cost a skip, never change a file.
+
+`ATTR_CMNEXT_PRIVATESIZE` is not used: it counts bytes a snapshot still holds as
+shared, so a file can report no private bytes while no other file shares a block
+with it. Nor is the volume capability `VOL_CAP_FMT_CLONE_MAPPING`, which the data
+volumes this was built on do not set although they report both attributes as above.
+
+A file is always hashed unless the clone id proves its bytes: one with no clone of
+its size in the scope, a hard link (`fclones` treats links as one file), a
+compressed file (decmpfs keeps the bytes outside the data stream), a dataless one,
+one below `--min` under the larger of its two readings, and one whose path might
+match an `--exclude`. A dirty page of a file mapped writable is not in either file's
+stream until it is written back, the same blind spot the extent map has, and the
+apply's writer scan covers it in the same way.
+
+`fclones` still applies every filter (`--exclude`, `--min`, `--one-fs`) to what it
+is given on `--stdin`; the prefilter only decides what to give it. The two places
+it reads `--exclude` itself are deliberately one-sided, so a difference from
+`fclones`' glob rules can only cost time. It prunes a directory only for the shape
+`**/a/b/**` with literal or `*`/`?` segments, read narrowly, so it never skips a
+directory `fclones` would walk. It withholds a file only if no pattern's literal
+text appears in its path in order, a test that is wider than any reading of the
+glob and its anchoring. Both are checked against `fclones` itself in the tests.
+On `--stdin` input `fclones` also drops a file whose path plus `/` an exclude ending
+in `**` matches, so a file named, say, `target` under `--exclude '**/target/**'`
+is left out of the scan; that only skips a file.
+
+What the prefilter cannot list or describe it hands to `fclones` as a directory,
+which `fclones` walks itself as before: a directory it cannot open (so the
+permission note is unchanged), one holding a name a line of `--stdin` cannot carry
+(a newline or carriage return, or a name that is not UTF-8), and a dataless one.
+If it cannot run at all (`--check`: an unreadable `--min` or scope) the scan is the
+plain `fclones` walk, and if it fails partway the run stops before the apply, since
+the report would be missing files. The file list goes to `fclones` through a pipe,
+not a file: for a million files it is a couple of hundred megabytes.
+
+The listing runs on the apply's thread count (one per efficiency core), since it
+waits on the disk. Its cost is roughly the `fclones` walk it replaces plus the
+clone attributes; what it saves is the reading of every withheld file.
+
 ## Reclaim accounting
 
 `fclones` reports logical duplicate bytes (`st_size`), but logical bytes are not

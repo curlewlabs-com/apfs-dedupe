@@ -437,6 +437,12 @@ def _inspect_workers(read: Callable[[str], Optional[int]] = _sysctl_int) -> int:
     return max(1, read(f"hw.perflevel{levels - 1}.logicalcpu") or 1)
 
 
+def inspect_workers() -> int:
+    """_inspect_workers, for lib/prefilter.py, whose directory listing waits on
+    the disk the same way and runs as the same background job."""
+    return _inspect_workers()
+
+
 class _Inspected(NamedTuple):
     """What one file looked like when a thread read it, which may no longer be
     true by the time the apply reaches it. Only good for deciding to leave a file
@@ -1126,6 +1132,31 @@ class _FclonesStats(TypedDict, total=False):
     redundant_file_count: int
 
 
+class _SharedReport(TypedDict):
+    withheld: int
+    groups: list[_FclonesGroup]
+
+
+def merge_shared(groups: list[list[FullPath]], shared: Sequence[list[FullPath]]
+                 ) -> list[list[FullPath]]:
+    """The report's groups with the prefilter's withheld clones put back. Each
+    shared set is [offered, withheld...]: fclones hashed only the first, so the rest
+    join whichever group that file landed in, or, if fclones found it no duplicate
+    besides them, form a group of their own. Membership is the prefilter's claim
+    that the files are byte-identical (they read one data stream; see
+    lib/prefilter.py); dedupe_group still maps each one, and an apply still
+    compares the bytes before changing anything."""
+    rest = {s[0]: s[1:] for s in shared if len(s) >= 2}
+    merged = [list(g) for g in groups]
+    for g in merged:
+        extra: list[FullPath] = []
+        for f in g:
+            extra.extend(rest.pop(f, []))
+        g.extend(extra)
+    merged.extend([offered, *withheld] for offered, withheld in rest.items())
+    return merged
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description="Apply APFS-clone deduplication from an fclones JSON report read on stdin.")
@@ -1144,6 +1175,9 @@ def main() -> int:
     # hand-built JSON without them and the summary just omits the scan line.
     p.add_argument("--scan-seconds", type=int, default=None, help=argparse.SUPPRESS)
     p.add_argument("--files-scanned", type=int, default=None, help=argparse.SUPPRESS)
+    # The prefilter's withheld clone sets (lib/prefilter.py --shared-out), another
+    # wrapper->engine seam.
+    p.add_argument("--shared", type=FullPath, default=None, help=argparse.SUPPRESS)
     args = p.parse_args()
 
     # Authoritative apply-mode safety gate: the engine -- not just the shell
@@ -1184,6 +1218,17 @@ def main() -> int:
     # typed shapes (and brand the paths FullPath) at this one trusted boundary.
     groups = cast("list[_FclonesGroup]", report.get("groups", []))
     stats = cast("_FclonesStats", report.get("header", {}).get("stats", {}))
+    shared: list[_FclonesGroup] = []
+    withheld = 0
+    if args.shared is not None:
+        try:
+            with open(args.shared, encoding="utf-8") as f:
+                shared_report = cast("_SharedReport", json.load(f))
+            shared = shared_report["groups"]
+            withheld = shared_report["withheld"]
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            print(f"error: could not read prefilter report {args.shared}: {e}", file=sys.stderr)
+            return 1
 
     # Two channels: the report a user keeps -> stdout, so `> plan.txt` captures it
     # (the dry-run plan and the summary always; per-file `cloned` lines in --apply
@@ -1207,7 +1252,8 @@ def main() -> int:
     total_already_shared = 0
     total_already_shared_logical = 0
     total_already_shared_allocated = 0
-    file_groups = [g["files"] for g in groups if len(g.get("files", [])) >= 2]
+    file_groups = merge_shared([g["files"] for g in groups if len(g.get("files", [])) >= 2],
+                               [g["files"] for g in shared])
     file_count = sum(map(len, file_groups))
     workers = _inspect_workers()
     if file_count:
@@ -1236,7 +1282,8 @@ def main() -> int:
     # the duration can stand alone if the files count could not be read.
     if args.scan_seconds is not None:
         if args.files_scanned is not None:
-            print(f"scanned: {args.files_scanned} files in {_human_duration(args.scan_seconds)}")
+            print(f"scanned: {args.files_scanned + withheld} files in "
+                  f"{_human_duration(args.scan_seconds)}")
         else:
             print(f"scan completed in {_human_duration(args.scan_seconds)}")
 
@@ -1244,6 +1291,8 @@ def main() -> int:
     if found is not None:
         print(f"duplicates found by fclones: {_human(found)} logical "
               f"in {stats.get('redundant_file_count', '?')} files")
+    if withheld:
+        print(f"not re-hashed: {withheld} files already sharing storage with an identical file")
     # Space earlier runs already saved: duplicates we found still sharing
     # storage from a prior clone, left untouched this run (see dedupe_group).
     if total_already_shared:

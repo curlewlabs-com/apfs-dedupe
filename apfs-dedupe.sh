@@ -23,6 +23,8 @@ INCLUDE_APP_DATA=""
 GIT_PRESET=""
 VERBOSE=""
 REQUIRE_AC=""
+CACHE=1
+PREFILTER=1
 
 usage() {
     cat <<'EOF'
@@ -66,6 +68,16 @@ Usage: apfs-dedupe.sh [options]
   --verbose        print a line per cloned file (in --apply) and per skipped file;
                    default: an --apply run prints just the summary and skips are
                    summarized by reason (a dry-run always prints its full plan)
+  --no-cache       do not use fclones' hash cache. By default fclones keeps the
+                   hashes it computes in its cache (~/Library/Caches/fclones, or
+                   /var/root/Library/Caches/fclones for root), keyed by device,
+                   inode, size and modification time, so an unchanged file is
+                   not read again on the next run. The cache is never pruned;
+                   delete that directory to reclaim it.
+  --no-prefilter   hash every file. By default the scope is listed first and
+                   files that already share all their storage with an identical
+                   file (APFS clones from an earlier run) are not given to
+                   fclones to hash; the apply still checks each one.
   --require-ac     skip the run (exit 0, changing nothing) if not on AC power. For
                    unattended/scheduled use so a laptop on battery -- e.g. during a
                    power outage -- defers this best-effort sweep to the next run on
@@ -113,6 +125,8 @@ while [ "$argc" -gt 0 ]; do
         --git) GIT_PRESET=1; shift ;;
         --verbose) VERBOSE=1; shift ;;
         --require-ac) REQUIRE_AC=1; shift ;;
+        --no-cache) CACHE=""; shift ;;
+        --no-prefilter) PREFILTER=""; shift ;;
         --min) MIN="${2:?--min needs a SIZE}"; MIN_SET=1; shift 2; argc=$((argc - 1)) ;;
         --min=*) MIN="${1#--min=}"; MIN_SET=1; shift ;;
         --scope) SCOPE="${2:?--scope needs a PATH}"; shift 2; argc=$((argc - 1)) ;;
@@ -252,6 +266,7 @@ fi
 
 HERE=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
 APPLY_ENGINE="$HERE/lib/apply.py"
+PREFILTER_ENGINE="$HERE/lib/prefilter.py"
 
 # Clones and displaced files wait here, outside the trees being deduped; see
 # _open_work_dir in lib/apply.py. It sits under the scope so it is on the same
@@ -260,7 +275,13 @@ WORK_DIR="$SCOPE/.apfsdedupe-work"
 
 REPORT=$(mktemp)
 FCERR=$(mktemp)
-trap 'rm -f "$REPORT" "$FCERR"' EXIT INT TERM
+# The prefilter's side: its stderr, its withheld clone sets, and the pipe that
+# carries its file list to fclones without writing it to disk (a list for a
+# million files is a couple of hundred MB).
+PFERR=$(mktemp)
+SHARED=$(mktemp)
+PIPE_DIR=$(mktemp -d)
+trap 'rm -f "$REPORT" "$FCERR" "$PFERR" "$SHARED"; rm -rf "$PIPE_DIR"' EXIT INT TERM
 
 # Cloud-backed files (iCloud Drive, third-party File Providers, Photos library
 # originals) can be "dataless" -- evicted to the cloud, holding no local bytes.
@@ -352,11 +373,45 @@ echo "Scanning $SCOPE (files >= $MIN) with fclones..." >&2
 # must. Left raw they bury the result, so by default fold them into one counted
 # note carrying the same Full Disk Access advice the engine gives, and pass every
 # other fclones line (its progress/summary, real warnings) straight through.
+#
+# --cache: fclones keeps each hash it computes, keyed by device, inode, size and
+# mtime, in its cache directory (~/Library/Caches/fclones; root's is under
+# /var/root), so a file unchanged since the last run is not read again. A stale
+# entry can only put a file in the wrong group, and the apply compares the bytes
+# before it changes anything. fclones never prunes the cache.
+fclones_group() {
+    if [ -n "$CACHE" ]; then
+        fclones group --cache --no-ignore --hidden --one-fs --min "$MIN" "$@" --format json
+    else
+        fclones group --no-ignore --hidden --one-fs --min "$MIN" "$@" --format json
+    fi
+}
+
+# The prefilter (lib/prefilter.py) lists the scope itself and gives fclones its
+# files on stdin, holding back all but one file of each set that already shares
+# one data stream -- the clones an earlier run made -- so a re-run does not hash
+# them again. It reads the same --exclude arguments, and fclones still applies
+# every filter to what it is given. If it cannot run here (--check says why) the
+# scan is the plain fclones walk.
 rc=0
+prc=0
+USE_SHARED=""
 scan_start=$(date +%s)
-fclones group --no-ignore --hidden --one-fs --min "$MIN" "$@" \
-    --format json "$SCOPE" >"$REPORT" 2>"$FCERR" || rc=$?
+if [ -n "$PREFILTER" ] && python3 "$PREFILTER_ENGINE" --check --scope "$SCOPE" --min "$MIN" "$@" 2>"$PFERR"; then
+    USE_SHARED=1
+    mkfifo "$PIPE_DIR/paths"
+    python3 "$PREFILTER_ENGINE" --scope "$SCOPE" --min "$MIN" --shared-out "$SHARED" "$@" \
+        >"$PIPE_DIR/paths" 2>"$PFERR" &
+    pf_pid=$!
+    fclones_group "$@" --stdin <"$PIPE_DIR/paths" >"$REPORT" 2>"$FCERR" || rc=$?
+    wait "$pf_pid" || prc=$?
+else
+    fclones_group "$@" "$SCOPE" >"$REPORT" 2>"$FCERR" || rc=$?
+fi
 scan_secs=$(( $(date +%s) - scan_start ))
+if [ -n "$PREFILTER" ] && [ -s "$PFERR" ]; then
+    cat "$PFERR" >&2
+fi
 
 # Match the OS strerror text, not fclones' surrounding wording: the errno string
 # is stable across fclones versions. It is English here because launchd jobs run
@@ -381,6 +436,12 @@ fi
 if [ "$rc" -ne 0 ]; then
     echo "error: fclones exited with status $rc" >&2
     exit "$rc"
+fi
+# fclones saw only what the prefilter gave it before it stopped, so the report may
+# be missing files; act on none of it.
+if [ "$prc" -ne 0 ]; then
+    echo "error: the prefilter exited with status $prc; nothing was changed." >&2
+    exit "$prc"
 fi
 
 # Files fclones actually considered (after the --min filter), read best-effort
@@ -414,6 +475,7 @@ set --
 [ -n "$VERBOSE" ] && set -- "$@" --verbose
 set -- "$@" --scan-seconds "$scan_secs"
 [ -n "$files_scanned" ] && set -- "$@" --files-scanned "$files_scanned"
+[ -n "$USE_SHARED" ] && set -- "$@" --shared "$SHARED"
 python3 "$APPLY_ENGINE" "$@" <"$REPORT"
 
 # After an --apply, APFS/Time Machine *local* snapshots (taken hourly) are
