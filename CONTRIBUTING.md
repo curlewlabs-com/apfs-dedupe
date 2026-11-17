@@ -38,14 +38,11 @@ check and shellcheck run anywhere.
 - **Pin dependencies exactly.** A GitHub Action is pinned to its release's
   commit SHA with the version beside it, since a tag can be moved, and tools
   are pinned to exact versions (the `pyright` / `shellcheck` pins in CI), so a
-  resolver cannot silently move them. Match that when adding any. The one
-  exception is `dtolnay/rust-toolchain` in CI: it is pinned to a commit of its
-  `stable` branch, a toolchain selector rather than a release, so the Rust it
-  installs is whatever is stable; the tool it builds - `fclones` - is itself
-  pinned (`cargo install fclones --version <version> --locked`). Renovate
-  proposes updates to these pins, and moves the rust-toolchain commit as the
-  branch moves; the `# renovate:` comment above an inline pin tells it what
-  the literal is, so a new inline pin needs one.
+  resolver cannot silently move them. Match that when adding any. That
+  includes the Rust release CI builds `fclones` with, and `fclones` itself
+  (`cargo install fclones --version <version> --locked`). Renovate proposes
+  updates to these pins; the `# renovate:` comment above an inline pin tells
+  it what the literal is, so a new inline pin needs one.
 - **Comments explain _why_, not _what_.** `lib/apply.py` brands path strings as
   `FullPath` vs `Basename` (`NewType`s that pyright enforces in strict mode) so a
   directory-relative component cannot be passed where a resolvable path belongs;

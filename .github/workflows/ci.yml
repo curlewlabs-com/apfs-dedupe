@@ -46,7 +46,15 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      # The runner image ships rustup but not a fixed Rust, so the toolchain
+      # that builds fclones is installed at an exact release.
+      - name: install Rust
+        env:
+          # renovate: datasource=github-releases depName=rust-lang/rust
+          RUST_VERSION: 1.99.1
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
       # fclones publishes no macOS release asset, so build the exact crate
       # version the wrapper contract smoke is pinned to.
       - name: install fclones
