@@ -59,6 +59,11 @@ and describe the _why_ in the PR body. CI must be green before merge.
 
 ## Releasing
 
+A patch or minor release needs no approval: whoever cuts it follows the steps
+below in order, on a `main` commit whose required checks have passed. A major
+version, a 1.0, or a minor before 1.0 that changes an interface consumers use
+needs the maintainer's explicit approval before its tag is pushed.
+
 Releases use fixed `vMAJOR.MINOR.PATCH` tags. The repository blocks updates and
 deletions of those tags, and publishing the GitHub Release makes its tag and
 release assets immutable. After merging the release commit to `main`, create
