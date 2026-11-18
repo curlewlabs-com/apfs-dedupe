@@ -10,5 +10,8 @@ extend-select = ["I", "UP", "B"]
 
 [tool.mypy]
 python_version = "3.12"
+# macOS-only code, type-checked on Linux in CI: check it as darwin wherever mypy
+# runs, as pyrightconfig.json does for pyright.
+platform = "darwin"
 strict = true
 files = ["lib"]
