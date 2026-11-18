@@ -523,12 +523,14 @@ case "$recorded" in
     /*) assert_eq "interpreter: the job records the installer's python3" "$recorded" "$(python3 -c 'import sys; print(sys.executable)')" ;;
     *) fail "interpreter: the job does not name its python3 by absolute path (got '$recorded')" ;;
 esac
+# With no newer one anywhere it looks: the prefix search is pointed at a
+# directory that does not exist, so the real Homebrew prefixes cannot answer.
 rc=0
-err=$(PATH="$d/old:$PATH" "$HERE/../install-daily.sh" --print --scope "$d/scope" 2>&1 >/dev/null) || rc=$?
+err=$(PATH="$d/old:$PATH" APFS_DEDUPE_BREW_BINS="$d/nobrew" "$HERE/../install-daily.sh" --print --scope "$d/scope" 2>&1 >/dev/null) || rc=$?
 case "$rc:$err" in
     0:*) fail "interpreter: the installer accepted a python3 older than 3.12" ;;
-    *"older than Python 3.12"*) pass "interpreter: the installer refuses a python3 older than 3.12" ;;
-    *) fail "interpreter: the installer refused without saying why (got: $err)" ;;
+    *"none of these is"*"$d/old/python3"*"$d/nobrew/python3"*) pass "interpreter: the installer refuses, naming where it looked" ;;
+    *) fail "interpreter: the installer refused without saying where it looked (got: $err)" ;;
 esac
 rc=0
 err=$(APFS_DEDUPE_PYTHON="$d/old/python3" PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" 2>&1 >/dev/null) || rc=$?
@@ -541,6 +543,38 @@ if [ -e "$d/fclones-ran" ]; then
     fail "interpreter: the wrapper scanned before refusing the interpreter"
 else
     pass "interpreter: the wrapper refuses before it scans"
+fi
+rc=0
+err=$(env -u APFS_DEDUPE_PYTHON PATH="$d/old:$d/bin:$PATH" APFS_DEDUPE_BREW_BINS="$d/nobrew" "$SCRIPT" --scope "$d/scope" 2>&1 >/dev/null) || rc=$?
+case "$rc:$err" in
+    0:*) fail "interpreter: the wrapper ran with no python3 new enough anywhere" ;;
+    *"none of these is"*"$d/old/python3"*"$d/nobrew/python3"*) pass "interpreter: the wrapper refuses, naming where it looked" ;;
+    *) fail "interpreter: the wrapper refused without saying where it looked (got: $err)" ;;
+esac
+
+# ---- under sudo, and in a job an earlier release installed, a newer python3 in
+# a Homebrew prefix is found when the one on PATH is too old ----
+# sudo and launchd both give a command a PATH without the Homebrew prefixes, so
+# python3 there is the /usr/bin/python3 macOS ships, older than the engine
+# needs, even on a Mac with Homebrew's Python installed; a job installed before
+# the interpreter was recorded has nothing else to go on. The stub ahead of
+# /usr/bin keeps "too old" certain whatever /usr/bin/python3 is, and
+# APFS_DEDUPE_BREW_BINS points the prefix search at a link to this run's python3.
+sudo_path="$d/old:/usr/bin:/bin:/usr/sbin:/sbin"
+mkdir -p "$d/brew"
+ln -s "$(python3 -c 'import sys; print(sys.executable)')" "$d/brew/python3"
+expected=$("$d/brew/python3" -c 'import sys; print(sys.executable)')
+rc=0
+env PATH="$sudo_path" APFS_DEDUPE_BREW_BINS="$d/brew" "$HERE/../install-daily.sh" --print --system --scope "$d/scope" >"$d/job-sudo.plist" 2>/dev/null || rc=$?
+recorded=$(plutil -extract EnvironmentVariables.APFS_DEDUPE_PYTHON raw -o - "$d/job-sudo.plist" 2>/dev/null || true)
+assert_eq "interpreter: under a sudo PATH the installer records the python3 in a Homebrew prefix" "$rc:$recorded" "0:$expected"
+rm -f "$d/fclones-ran"
+rc=0
+env -u APFS_DEDUPE_PYTHON PATH="$d/bin:$sudo_path" APFS_DEDUPE_BREW_BINS="$d/brew" "$SCRIPT" --scope "$d/scope" >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 0 ] && [ -e "$d/fclones-ran" ]; then
+    pass "interpreter: a job with no recorded interpreter runs with the python3 in a Homebrew prefix"
+else
+    fail "interpreter: a job with no recorded interpreter did not run (rc=$rc)"
 fi
 
 # ---- the dry-run plan and the --apply audit trail go to STDOUT (so '> file'

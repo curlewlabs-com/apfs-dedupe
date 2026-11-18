@@ -61,6 +61,8 @@ HERE=$(
     cd -- "$(dirname -- "$0")" && pwd
 )
 TOOL="$HERE/apfs-dedupe.sh"
+# shellcheck source=lib/python.sh
+. "$HERE/lib/python.sh"
 
 # Escape the three characters that would break the plist XML. Paths with spaces
 # are fine inside an XML <string>; &, <, > are not, so a home or repo path
@@ -182,18 +184,7 @@ SCOPE=$(
 # which python3 can be another, older interpreter than the one found here.
 # --uninstall writes no job, so it needs none.
 if [ "$ACTION" != "uninstall" ]; then
-    PYTHON=$(command -v python3) || {
-        echo "error: python3 not found -- apfs-dedupe needs Python 3.12 or newer (for example: brew install python)." >&2
-        exit 1
-    }
-    "$PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 12))' 2>/dev/null || {
-        echo "error: $PYTHON is older than Python 3.12, which apfs-dedupe needs." >&2
-        echo "       Put a newer python3 first on PATH (for example: brew install python)." >&2
-        if [ "$MODE" = "system" ]; then
-            echo "       If sudo replaced your PATH, pass it through: sudo env PATH=\"\$PATH\" $0 --system ..." >&2
-        fi
-        exit 1
-    }
+    find_python || exit 1
     # The interpreter itself, as it names itself: what PATH found can be a
     # relative path, or a launcher such as a pyenv shim that picks its Python
     # from an environment and working directory launchd does not reproduce.
@@ -211,10 +202,14 @@ fi
 # that excludes Homebrew, where fclones is installed, so the job would fail
 # "fclones not found" without this. Prepend the dirs of the
 # fclones/python3 we can resolve now to the usual Homebrew (Apple-silicon and
-# Intel) and system locations, so the job finds the same tools the installing
-# shell has.
+# Intel; APFS_DEDUPE_BREW_BINS) and system locations, so the job finds the same
+# tools the installing shell has.
 job_path() {
-    p="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    p=""
+    for dir in $APFS_DEDUPE_BREW_BINS; do
+        p="$p$dir:"
+    done
+    p="${p}/usr/bin:/bin:/usr/sbin:/sbin"
     for tool in fclones python3; do
         dir=$(command -v "$tool" 2>/dev/null) || continue
         dir=$(dirname -- "$dir")
