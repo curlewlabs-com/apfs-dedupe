@@ -52,10 +52,10 @@ scope: `sudo ./apfs-dedupe.sh` (still a dry-run), then `sudo ./apfs-dedupe.sh --
 [`fclones`](https://github.com/pkolaczk/fclones) can do the dedupe apply too
 (`fclones dedupe`); on macOS that path has two gaps:
 
-- **A vanishing-file window.** `fclones dedupe` renames the original aside, *then*
+- **A vanishing-file window.** `fclones dedupe` renames the original aside, _then_
   clones over it - so the path briefly has no file, and stays that way if the
   process dies between the two steps.
-- **Dropped ACLs.** `clonefile` copies the *source's* metadata; dedupers restore
+- **Dropped ACLs.** `clonefile` copies the _source's_ metadata; dedupers restore
   POSIX bits / owner / times / xattrs but lose the file's ACLs.
 
 `apfs-dedupe` does the apply itself, correctly - every step relative to a file
@@ -81,7 +81,7 @@ never appears beside your files, where `git status` or a file watcher would see 
 ## Deduping all of /Users, across every user
 
 Running as root over the whole machine is the intended use, and it is safe. The
-apply restores each *replaced* file's own owner, group, mode, and ACL - the
+apply restores each _replaced_ file's own owner, group, mode, and ACL - the
 canonical file is never modified - so every file keeps its identity and the only
 thing that ever crosses a user boundary is the shared bytes, which were identical
 to begin with. Because the clone is copy-on-write, a later write by any user
@@ -99,7 +99,7 @@ files can't be modified in any case (they would simply error and be skipped).
 - **Dry-run by default.** Nothing changes until you pass `--apply`.
 - **Content re-verify against a frozen clone, right before the swap.** `clonefile`
   is not content-verified by the kernel (unlike Linux `FIDEDUPERANGE`), so we clone
-  first - a copy-on-write snapshot - then re-compare *that* against the duplicate
+  first - a copy-on-write snapshot - then re-compare _that_ against the duplicate
   immediately before replacing. It closes the window since the scan (seconds to
   minutes earlier on a large run), a concurrent write to the original can't affect
   the result, and this check is always on.
@@ -202,7 +202,7 @@ apfs-dedupe.sh [--apply] [--scope PATH] [--min SIZE] [--exclude GLOB] [--verbose
   every user; deduping across users is safe - see above).
 - `--min SIZE` - ignore files smaller than this (default `1M`). A bare number is
   **bytes** (`--min 100000` ~ 98 KiB); add a suffix for units - `500K`, `1M`,
-  `2G` (decimal) or `KiB`/`MiB`/`GiB` (binary). The default bounds *work*, not
+  `2G` (decimal) or `KiB`/`MiB`/`GiB` (binary). The default bounds _work_, not
   savings: cloning any ordinary allocated duplicate frees at least one 4 KiB block
   whatever its size, so on git-/CI-heavy trees - where savings hide in many small
   files - use a low `--min` or the `--git` preset below.
@@ -226,7 +226,7 @@ apfs-dedupe.sh [--apply] [--scope PATH] [--min SIZE] [--exclude GLOB] [--verbose
   reachable only with **Full Disk Access**, which can't be granted from a CLI.
   Grant it to your terminal app in System Settings -> Privacy & Security for an
   interactive run. A scheduled LaunchAgent/LaunchDaemon runs via `/bin/sh`, so the
-  only thing to grant would be the system shell - Full Disk Access for *every*
+  only thing to grant would be the system shell - Full Disk Access for _every_
   shell script, which this tool won't recommend; the daemon therefore stays out of
   those folders, and a periodic interactive run covers them.
 - `--verbose` - print a line per cloned file (in `--apply`) and per skipped file.
@@ -270,7 +270,7 @@ often Time Machine's **local** snapshots, which macOS takes hourly. Snapshots ar
 copy-on-write: one taken while a duplicate still held its own blocks keeps
 referencing those blocks, so the blocks dedup frees stay attached to the snapshot
 instead of returning to free space. The allocated figure is the best filesystem
-estimate of block reclaim; the *realized* free space lags until the snapshots
+estimate of block reclaim; the _realized_ free space lags until the snapshots
 holding the pre-dedup state are gone.
 
 Local Time Machine snapshots expire on their own (~24 hours, sooner under disk
@@ -284,7 +284,7 @@ df -h /System/Volumes/Data        # confirm
 
 This removes only **local** snapshots - your actual Time Machine backups on the
 external/network destination are untouched; the only cost is local hourly rollback
-points. New snapshots capture the *deduped* state, so they don't re-pin the freed
+points. New snapshots capture the _deduped_ state, so they don't re-pin the freed
 blocks: once the old snapshots clear, the reclaim sticks. After an `--apply`, the
 tool prints this reminder when local snapshots are present (a note only - it never
 deletes snapshots; that's your call).
@@ -297,7 +297,7 @@ run are reclaimed automatically.
 Both modes are **AC-gated**: a scheduled run that lands on battery - e.g. a laptop
 during a power outage - skips and defers to the next run on AC, so this best-effort
 cleanup never drains the battery (a desktop always reads as AC and so never skips).
-Only the run's *start* is gated: a sweep already in progress when AC is lost runs to
+Only the run's _start_ is gated: a sweep already in progress when AC is lost runs to
 completion.
 
 **Per-user (default)** - a **LaunchAgent** that runs as you, every day at 02:00,
