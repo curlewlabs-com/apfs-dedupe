@@ -49,6 +49,7 @@ prefilter cannot run with these arguments and the wrapper should do the same.
 
 macOS / APFS only. See docs/architecture.md "Re-runs: hashing only what changed".
 """
+
 import argparse
 import ctypes
 import ctypes.util
@@ -61,12 +62,13 @@ import re
 import struct
 import sys
 import threading
-from typing import IO, Callable, Iterator, NamedTuple, Optional, Sequence, Union, cast
+from collections.abc import Callable, Iterator, Sequence
+from typing import IO, NamedTuple, cast
 
 # The apply engine sits beside this file; import it from there whatever the
 # interpreter's path (python3 -I leaves the script's directory off it).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from apply import inspect_workers  # noqa: E402
+from apply import inspect_workers
 
 FALLBACK = 3
 
@@ -96,24 +98,41 @@ SF_DATALESS = 0x40000000
 
 BULK_BUFFER = 256 * 1024
 
-_COMMON = (ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_ERROR | ATTR_CMN_NAME | ATTR_CMN_DEVID
-           | ATTR_CMN_OBJTYPE | ATTR_CMN_FLAGS | ATTR_CMN_FILEID)
+_COMMON = (
+    ATTR_CMN_RETURNED_ATTRS
+    | ATTR_CMN_ERROR
+    | ATTR_CMN_NAME
+    | ATTR_CMN_DEVID
+    | ATTR_CMN_OBJTYPE
+    | ATTR_CMN_FLAGS
+    | ATTR_CMN_FILEID
+)
 _DIR = ATTR_DIR_MOUNTSTATUS
 _FILE = ATTR_FILE_LINKCOUNT | ATTR_FILE_DATALENGTH
 _EXT = ATTR_CMNEXT_CLONEID | ATTR_CMNEXT_CLONE_REFCNT
 
 
 class _AttrList(ctypes.Structure):
-    _fields_ = [("bitmapcount", ctypes.c_ushort), ("reserved", ctypes.c_uint16),
-                ("commonattr", ctypes.c_uint32), ("volattr", ctypes.c_uint32),
-                ("dirattr", ctypes.c_uint32), ("fileattr", ctypes.c_uint32),
-                ("forkattr", ctypes.c_uint32)]
+    _fields_ = [
+        ("bitmapcount", ctypes.c_ushort),
+        ("reserved", ctypes.c_uint16),
+        ("commonattr", ctypes.c_uint32),
+        ("volattr", ctypes.c_uint32),
+        ("dirattr", ctypes.c_uint32),
+        ("fileattr", ctypes.c_uint32),
+        ("forkattr", ctypes.c_uint32),
+    ]
 
 
 _lib = ctypes.CDLL(ctypes.util.find_library("System"), use_errno=True)
 # int getattrlistbulk(int dirfd, struct attrlist *, void *buf, size_t, uint64_t options)
-_lib.getattrlistbulk.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
-                                 ctypes.c_size_t, ctypes.c_uint64)
+_lib.getattrlistbulk.argtypes = (
+    ctypes.c_int,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.c_size_t,
+    ctypes.c_uint64,
+)
 _lib.getattrlistbulk.restype = ctypes.c_int
 
 # With FSOPT_PACK_INVAL_ATTRS every requested attribute of the groups that apply
@@ -124,23 +143,26 @@ _lib.getattrlistbulk.restype = ctypes.c_int
 # within its group, with ATTR_CMN_ERROR first. Decoding is where the walk spends
 # its time, so it is two unpacks per entry.
 _HEAD = struct.Struct(
-    "=I"       # record length
-    "5I"       # attribute_set_t returned: common, vol, dir, file, extended
-    "I"        # ATTR_CMN_ERROR
-    "iI"       # ATTR_CMN_NAME: attrreference_t (offset from itself, length)
-    "i"        # ATTR_CMN_DEVID
-    "I"        # ATTR_CMN_OBJTYPE
-    "I"        # ATTR_CMN_FLAGS
-    "Q")       # ATTR_CMN_FILEID
+    "=I"  # record length
+    "5I"  # attribute_set_t returned: common, vol, dir, file, extended
+    "I"  # ATTR_CMN_ERROR
+    "iI"  # ATTR_CMN_NAME: attrreference_t (offset from itself, length)
+    "i"  # ATTR_CMN_DEVID
+    "I"  # ATTR_CMN_OBJTYPE
+    "I"  # ATTR_CMN_FLAGS
+    "Q"
+)  # ATTR_CMN_FILEID
 _FILE_TAIL = struct.Struct(
-    "=I"       # ATTR_FILE_LINKCOUNT
-    "q"        # ATTR_FILE_DATALENGTH
-    "Q"        # ATTR_CMNEXT_CLONEID
-    "I")       # ATTR_CMNEXT_CLONE_REFCNT
+    "=I"  # ATTR_FILE_LINKCOUNT
+    "q"  # ATTR_FILE_DATALENGTH
+    "Q"  # ATTR_CMNEXT_CLONEID
+    "I"
+)  # ATTR_CMNEXT_CLONE_REFCNT
 _DIR_TAIL = struct.Struct(
-    "=I"       # ATTR_DIR_MOUNTSTATUS
-    "Q"        # ATTR_CMNEXT_CLONEID
-    "I")       # ATTR_CMNEXT_CLONE_REFCNT
+    "=I"  # ATTR_DIR_MOUNTSTATUS
+    "Q"  # ATTR_CMNEXT_CLONEID
+    "I"
+)  # ATTR_CMNEXT_CLONE_REFCNT
 _NAME_REF = 4 + 20 + 4
 _LENGTH = struct.Struct("=I")
 
@@ -149,27 +171,41 @@ class Entry(NamedTuple):
     """One directory entry as getattrlistbulk described it. objtype is None when
     the kernel reported an error for the entry instead of its attributes, and
     clone_id / clone_refcnt are None where the volume does not report them."""
+
     name: bytes
-    objtype: Optional[int]
+    objtype: int | None
     dev: int
     ino: int
     flags: int
     mounted_on: bool
     nlink: int
     size: int
-    clone_id: Optional[int]
-    clone_refcnt: Optional[int]
+    clone_id: int | None
+    clone_refcnt: int | None
 
 
 def _parse_entry(buf: memoryview, base: int) -> Entry:
-    (length, common, _vol, dirs, files, ext, err, name_off, name_len, dev, objtype, flags,
-     fileid) = _HEAD.unpack_from(buf, base)
+    (
+        length,
+        common,
+        _vol,
+        dirs,
+        files,
+        ext,
+        err,
+        name_off,
+        name_len,
+        dev,
+        objtype,
+        flags,
+        fileid,
+    ) = _HEAD.unpack_from(buf, base)
     start = base + _NAME_REF + name_off
-    name = bytes(buf[start:start + name_len]).split(b"\0", 1)[0]
+    name = bytes(buf[start : start + name_len]).split(b"\0", 1)[0]
     known = bool(common & ATTR_CMN_OBJTYPE) and not (common & ATTR_CMN_ERROR and err)
     mounted_on, nlink, size = False, 0, -1
-    clone_id: Optional[int] = None
-    clone_refcnt: Optional[int] = None
+    clone_id: int | None = None
+    clone_refcnt: int | None = None
     if files and _HEAD.size + _FILE_TAIL.size <= length:
         nlink, size, cid, refcnt = _FILE_TAIL.unpack_from(buf, base + _HEAD.size)
         if not files & ATTR_FILE_LINKCOUNT:
@@ -178,15 +214,27 @@ def _parse_entry(buf: memoryview, base: int) -> Entry:
             size = -1
     elif dirs and _HEAD.size + _DIR_TAIL.size <= length:
         mstatus, cid, refcnt = _DIR_TAIL.unpack_from(buf, base + _HEAD.size)
-        mounted_on = bool(dirs & ATTR_DIR_MOUNTSTATUS and mstatus & DIR_MNTSTATUS_MNTPOINT)
+        mounted_on = bool(
+            dirs & ATTR_DIR_MOUNTSTATUS and mstatus & DIR_MNTSTATUS_MNTPOINT
+        )
     else:
         return Entry(name, None, dev, fileid, flags, False, 0, -1, None, None)
     if ext & ATTR_CMNEXT_CLONEID:
         clone_id = cid
     if ext & ATTR_CMNEXT_CLONE_REFCNT:
         clone_refcnt = refcnt
-    return Entry(name, objtype if known else None, dev, fileid, flags, mounted_on, nlink, size,
-                 clone_id, clone_refcnt)
+    return Entry(
+        name,
+        objtype if known else None,
+        dev,
+        fileid,
+        flags,
+        mounted_on,
+        nlink,
+        size,
+        clone_id,
+        clone_refcnt,
+    )
 
 
 _ATTRS = _AttrList(ATTR_BIT_MAP_COUNT, 0, _COMMON, 0, _DIR, _FILE, _EXT)
@@ -215,8 +263,13 @@ def list_dir(path: str) -> list[Entry]:
         buf, view = _buffer()
         entries: list[Entry] = []
         while True:
-            n = _lib.getattrlistbulk(fd, ctypes.byref(al), buf, BULK_BUFFER,
-                                 FSOPT_ATTR_CMN_EXTENDED | FSOPT_PACK_INVAL_ATTRS)
+            n = _lib.getattrlistbulk(
+                fd,
+                ctypes.byref(al),
+                buf,
+                BULK_BUFFER,
+                FSOPT_ATTR_CMN_EXTENDED | FSOPT_PACK_INVAL_ATTRS,
+            )
             if n < 0:
                 e = ctypes.get_errno()
                 raise OSError(e, os.strerror(e), path)
@@ -262,7 +315,9 @@ class _Prune:
             if not (p.startswith("**/") and p.endswith("/**")):
                 continue
             segs = tuple(p[3:-3].split("/"))
-            if segs and all(s and s != "**" and _SEGMENT_SAFE.fullmatch(s) for s in segs):
+            if segs and all(
+                s and s != "**" and _SEGMENT_SAFE.fullmatch(s) for s in segs
+            ):
                 self.rules.append(segs)
 
     def matches(self, path: str) -> bool:
@@ -271,7 +326,9 @@ class _Prune:
         parts = path.split("/")
         for segs in self.rules:
             n = len(segs)
-            if len(parts) > n and all(fnmatch.fnmatchcase(parts[-n + i], segs[i]) for i in range(n)):
+            if len(parts) > n and all(
+                fnmatch.fnmatchcase(parts[-n + i], segs[i]) for i in range(n)
+            ):
                 return True
         return False
 
@@ -329,12 +386,25 @@ class _MightExclude:
 
 
 # ---- --min --------------------------------------------------------------------
-_UNITS = {"": 1, "b": 1, "k": 1024, "kb": 1000, "kib": 1024, "m": 1024**2, "mb": 1000**2,
-          "mib": 1024**2, "g": 1024**3, "gb": 1000**3, "gib": 1024**3, "t": 1024**4,
-          "tb": 1000**4, "tib": 1024**4}
+_UNITS = {
+    "": 1,
+    "b": 1,
+    "k": 1024,
+    "kb": 1000,
+    "kib": 1024,
+    "m": 1024**2,
+    "mb": 1000**2,
+    "mib": 1024**2,
+    "g": 1024**3,
+    "gb": 1000**3,
+    "gib": 1024**3,
+    "t": 1024**4,
+    "tb": 1000**4,
+    "tib": 1024**4,
+}
 
 
-def parse_min(text: str) -> Optional[int]:
+def parse_min(text: str) -> int | None:
     """--min as a byte count no smaller than fclones' reading of it, or None if it
     does not parse. Each single-letter unit takes its binary value, the larger of
     the two readings, so a size this admits is one fclones admits too."""
@@ -348,7 +418,7 @@ def parse_min(text: str) -> Optional[int]:
 
 
 # ---- the walk -----------------------------------------------------------------
-def _describable(name: bytes) -> Optional[str]:
+def _describable(name: bytes) -> str | None:
     """The name as fclones can read it back from a line of stdin, or None: it
     reads UTF-8 lines and strips a trailing CR."""
     if b"\n" in name or b"\r" in name:
@@ -363,6 +433,7 @@ class _Listed(NamedTuple):
     """What the walk keeps of a listed directory to offer it to fclones later:
     the names to offer one by one if it has to be split, and its subdirectories
     (pruned and other-volume ones left out)."""
+
     offer: list[str]
     subdirs: list[str]
 
@@ -388,10 +459,16 @@ class Walk:
         self.listed: dict[str, _Listed] = {}
 
     def _candidate(self, path: str, e: Entry) -> bool:
-        return (e.clone_id is not None and e.clone_id != 0 and e.clone_refcnt is not None
-                and e.clone_refcnt >= 2 and e.nlink == 1 and e.size >= self.min_size
-                and not e.flags & (UF_COMPRESSED | SF_DATALESS)
-                and not self.might_exclude.matches(path))
+        return (
+            e.clone_id is not None
+            and e.clone_id != 0
+            and e.clone_refcnt is not None
+            and e.clone_refcnt >= 2
+            and e.nlink == 1
+            and e.size >= self.min_size
+            and not e.flags & (UF_COMPRESSED | SF_DATALESS)
+            and not self.might_exclude.matches(path)
+        )
 
     def run(self, out: Callable[[str], None], workers: int = 1) -> None:
         """Offer fclones its input through out, holding back the clone sets for
@@ -406,9 +483,11 @@ class Walk:
                 if d == self.scope or len(d) <= len(self.scope):
                     break
                 d = os.path.dirname(d)
-        offered_clones = {p for files in self.clones.values() for _ino, p in files} - withheld
+        offered_clones = {
+            p for files in self.clones.values() for _ino, p in files
+        } - withheld
         if self.scope not in split:
-            out(self.scope)     # nothing withheld: fclones walks the whole scope
+            out(self.scope)  # nothing withheld: fclones walks the whole scope
             return
         stack = [self.scope]
         while stack:
@@ -422,10 +501,10 @@ class Walk:
                 if sub in split:
                     stack.append(sub)
                 else:
-                    out(sub)    # holds nothing withheld: fclones walks it
+                    out(sub)  # holds nothing withheld: fclones walks it
         for p in sorted(offered_clones):
             if os.path.dirname(p) in split:
-                out(p)          # elsewhere it is under a directory already offered
+                out(p)  # elsewhere it is under a directory already offered
 
     def _list_all(self, workers: int) -> None:
         """List every directory under the scope into self.listed and self.clones.
@@ -433,8 +512,8 @@ class Walk:
         and getattrlistbulk releases the GIL; the bookkeeping stays on this thread.
         Plain queues rather than futures: waiting on a set of futures rescans the
         whole set, which is quadratic over a tree's directories."""
-        todo: "queue.SimpleQueue[Optional[str]]" = queue.SimpleQueue()
-        done: "queue.SimpleQueue[tuple[str, Union[list[Entry], OSError]]]" = queue.SimpleQueue()
+        todo: queue.SimpleQueue[str | None] = queue.SimpleQueue()
+        done: queue.SimpleQueue[tuple[str, list[Entry] | OSError]] = queue.SimpleQueue()
 
         def lister() -> None:
             while True:
@@ -446,7 +525,9 @@ class Walk:
                 except OSError as e:
                     done.put((d, e))
 
-        threads = [threading.Thread(target=lister, daemon=True) for _ in range(max(1, workers))]
+        threads = [
+            threading.Thread(target=lister, daemon=True) for _ in range(max(1, workers))
+        ]
         for t in threads:
             t.start()
         try:
@@ -462,7 +543,7 @@ class Walk:
             for _ in threads:
                 todo.put(None)
 
-    def _visit(self, d: str, listed: "Union[list[Entry], OSError]") -> list[str]:
+    def _visit(self, d: str, listed: "list[Entry] | OSError") -> list[str]:
         """Record one listed directory; return the subdirectories to list. A
         directory that cannot be listed, or holds a name a line of stdin cannot
         carry, is not recorded: nothing under it is withheld, so it is offered
@@ -476,23 +557,25 @@ class Walk:
         subdirs: list[str] = []
         to_list: list[str] = []
         prefix = d if d.endswith("/") else d + "/"
-        for e, name in zip(listed, names):
+        for e, name in zip(listed, names, strict=True):
             assert name is not None
             path = prefix + name
             if e.objtype is None:
-                offer.append(name)          # unknown: fclones decides what it is
+                offer.append(name)  # unknown: fclones decides what it is
             elif e.objtype == VDIR:
                 if e.mounted_on or e.dev != self.scope_dev:
-                    continue                # --one-fs
+                    continue  # --one-fs
                 if self.prune.matches(path):
                     continue
                 subdirs.append(name)
                 if not e.flags & SF_DATALESS:
-                    to_list.append(path)    # a dataless one is fclones' call, as before
+                    to_list.append(path)  # a dataless one is fclones' call, as before
             elif e.objtype == VREG:
                 if self._candidate(path, e):
                     assert e.clone_id is not None
-                    self.clones.setdefault((e.dev, e.clone_id, e.size), []).append((e.ino, path))
+                    self.clones.setdefault((e.dev, e.clone_id, e.size), []).append(
+                        (e.ino, path)
+                    )
                 else:
                     offer.append(name)
             # symlinks and special files: fclones skips them without -L/-S
@@ -509,7 +592,7 @@ class Walk:
                 yield size, [p for _ino, p in sorted(files)]
 
 
-def check(scope: str, min_text: str) -> Optional[str]:
+def check(scope: str, min_text: str) -> str | None:
     """Why the prefilter cannot run here, or None if it can."""
     if parse_min(min_text) is None:
         return f"cannot read --min {min_text!r}"
@@ -520,8 +603,10 @@ def check(scope: str, min_text: str) -> Optional[str]:
     return None
 
 
-def main(argv: Optional[Sequence[str]] = None, stdout: IO[str] = sys.stdout) -> int:
-    p = argparse.ArgumentParser(description="List fclones' input, withholding proven clones.")
+def main(argv: Sequence[str] | None = None, stdout: IO[str] = sys.stdout) -> int:
+    p = argparse.ArgumentParser(
+        description="List fclones' input, withholding proven clones."
+    )
     p.add_argument("--scope", required=True)
     p.add_argument("--min", required=True)
     p.add_argument("--exclude", action="append", default=[])
@@ -529,8 +614,12 @@ def main(argv: Optional[Sequence[str]] = None, stdout: IO[str] = sys.stdout) -> 
     # Listing waits on the disk, so threads overlap the waits; the count is the
     # apply's (one per efficiency core), for the same reason: a scheduled run is a
     # background job macOS keeps on those cores.
-    p.add_argument("--workers", type=int, default=None,
-                   help="threads listing directories (default: one per efficiency core)")
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="threads listing directories (default: one per efficiency core)",
+    )
     args = p.parse_args(argv)
     reason = check(args.scope, args.min)
     if reason is not None:

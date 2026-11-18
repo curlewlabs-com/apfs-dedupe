@@ -1166,8 +1166,9 @@ fi
 # The recording stub below passes everything to the real fclones and keeps what
 # it was given on stdin, which is what proves a file was not hashed.
 REAL_FCLONES=$(command -v fclones)
-d="$WORK/prefilter"; mkdir -p "$d/bin" "$d/scope/x"
-cat > "$d/bin/fclones" <<EOF
+d="$WORK/prefilter"
+mkdir -p "$d/bin" "$d/scope/x"
+cat >"$d/bin/fclones" <<EOF
 #!/bin/sh
 for a in "\$@"; do printf '%s\n' "\$a"; done > "$d/argv"
 case " \$* " in
@@ -1177,8 +1178,14 @@ esac
 EOF
 chmod +x "$d/bin/fclones"
 s="$d/scope"
-head -c 65536 /dev/urandom > "$s/a"; cp -c "$s/a" "$s/b"; cp -c "$s/a" "$s/x/c"; cp "$s/a" "$s/plain"
-ia=$(ino "$s/a"); ib=$(ino "$s/b"); ic=$(ino "$s/x/c"); ip=$(ino "$s/plain")
+head -c 65536 /dev/urandom >"$s/a"
+cp -c "$s/a" "$s/b"
+cp -c "$s/a" "$s/x/c"
+cp "$s/a" "$s/plain"
+ia=$(ino "$s/a")
+ib=$(ino "$s/b")
+ic=$(ino "$s/x/c")
+ip=$(ino "$s/plain")
 out=$(PATH="$d/bin:$PATH" "$SCRIPT" --scope "$s" --min 1 2>/dev/null)
 offered=$(grep -cxE "$s/(a|b|x/c)" "$d/stdin" || true)
 assert_eq "prefilter: one file of a clone set is offered to fclones" "$offered" "1"
@@ -1205,15 +1212,19 @@ if [ "$(ino "$s/plain")" != "$ip" ] && cmp -s "$s/a" "$s/plain"; then pass "pref
 assert_eq "prefilter: --apply leaves the existing clones alone" "$(ino "$s/a") $(ino "$s/b") $(ino "$s/x/c")" "$ia $ib $ic"
 
 # With nothing to hold back the scan is the plain fclones walk, exactly as before.
-d5="$WORK/prefilter-none"; mkdir -p "$d5"
-head -c 4096 /dev/urandom > "$d5/a"; cp "$d5/a" "$d5/b"
+d5="$WORK/prefilter-none"
+mkdir -p "$d5"
+head -c 4096 /dev/urandom >"$d5/a"
+cp "$d5/a" "$d5/b"
 PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d5" --min 1 >/dev/null 2>&1
 if grep -qxF -- '--stdin' "$d/argv"; then fail "prefilter: a scope with no clones was not the plain walk"; else pass "prefilter: a scope with no clones is the plain fclones walk"; fi
 
 # A clone that has since been written, even with the same bytes, has its own data
 # stream again, so it must be hashed, and re-cloned to share its blocks again.
-d2="$WORK/prefilter-diverged"; mkdir -p "$d2"
-head -c 65536 /dev/urandom > "$d2/a"; cp -c "$d2/a" "$d2/b"
+d2="$WORK/prefilter-diverged"
+mkdir -p "$d2"
+head -c 65536 /dev/urandom >"$d2/a"
+cp -c "$d2/a" "$d2/b"
 dd if="$d2/a" of="$d2/b" bs=4096 skip=3 seek=3 count=1 conv=notrunc 2>/dev/null
 out=$(PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d2" --min 1 2>/dev/null)
 if ! grep -qxF -- '--stdin' "$d/argv"; then pass "prefilter: a rewritten clone is hashed (nothing withheld, plain walk)"; else fail "prefilter: a rewritten clone was withheld"; fi
@@ -1224,8 +1235,11 @@ esac
 
 # --exclude is the complete protection for a tree: a clone under it is never
 # offered, withheld into a group, or touched, even when its twin is in scope.
-d3="$WORK/prefilter-exclude"; mkdir -p "$d3/keep" "$d3/ex"
-head -c 65536 /dev/urandom > "$d3/keep/a"; cp -c "$d3/keep/a" "$d3/ex/b"; cp "$d3/keep/a" "$d3/keep/plain"
+d3="$WORK/prefilter-exclude"
+mkdir -p "$d3/keep" "$d3/ex"
+head -c 65536 /dev/urandom >"$d3/keep/a"
+cp -c "$d3/keep/a" "$d3/ex/b"
+cp "$d3/keep/a" "$d3/keep/plain"
 ib=$(ino "$d3/ex/b")
 out=$(PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d3" --min 1 --exclude '**/ex/**' --apply --verbose 2>&1)
 case "$out" in
@@ -1235,9 +1249,10 @@ esac
 assert_eq "prefilter: an excluded clone is untouched" "$(ino "$d3/ex/b")" "$ib"
 
 # ---- fclones' hash cache is on by default, and --no-cache turns it off ----
-d4="$WORK/cache"; mkdir -p "$d4/scope"
+d4="$WORK/cache"
+mkdir -p "$d4/scope"
 PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d4/scope" >/dev/null 2>&1 || true
-if grep -qxF -- '--cache' "$d/argv"; then pass "cache: fclones' hash cache is used by default"; else fail "cache: --cache not passed (argv: $(tr '\n' '|' < "$d/argv"))"; fi
+if grep -qxF -- '--cache' "$d/argv"; then pass "cache: fclones' hash cache is used by default"; else fail "cache: --cache not passed (argv: $(tr '\n' '|' <"$d/argv"))"; fi
 PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d4/scope" --no-cache >/dev/null 2>&1 || true
 if grep -qxF -- '--cache' "$d/argv"; then fail "cache: --no-cache still passed --cache"; else pass "cache: --no-cache leaves the cache off"; fi
 

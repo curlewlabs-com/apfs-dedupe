@@ -10,6 +10,7 @@ against real fclones, since fclones is what applies the patterns.
 
 Run by test/test.sh, as the invoking user.
 """
+
 import json
 import mmap
 import os
@@ -18,12 +19,11 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
-import apply as engine  # noqa: E402
-import prefilter  # noqa: E402
+import apply as engine
+import prefilter
 
 F_PUNCHHOLE = 99
 failed = 0
@@ -31,7 +31,9 @@ failed = 0
 
 def check(name: str, ok: bool, detail: str = "") -> None:
     global failed
-    print(f"{'PASS' if ok else 'FAIL'}: prefilter: {name}{' (' + detail + ')' if detail and not ok else ''}")
+    print(
+        f"{'PASS' if ok else 'FAIL'}: prefilter: {name}{' (' + detail + ')' if detail and not ok else ''}"
+    )
     failed += 0 if ok else 1
 
 
@@ -69,8 +71,12 @@ def test_clone_id_semantics(root: Path) -> None:
     fresh()
     ea, eb = entry(a), entry(b)
     check("a clone shares its source's clone id", same_stream(a, b))
-    check("a clone's refcount counts both files",
-          ea.clone_refcnt is not None and ea.clone_refcnt >= 2 and eb.clone_refcnt == ea.clone_refcnt)
+    check(
+        "a clone's refcount counts both files",
+        ea.clone_refcnt is not None
+        and ea.clone_refcnt >= 2
+        and eb.clone_refcnt == ea.clone_refcnt,
+    )
     plain = d / "plain"
     shutil.copyfile(a, plain)
     check("a plain copy has its own clone id", not same_stream(a, plain))
@@ -112,23 +118,30 @@ def test_clone_id_semantics(root: Path) -> None:
     def punch_hole(p: Path) -> None:
         import fcntl
         import struct
+
         fd = os.open(p, os.O_RDWR)
         try:
             fcntl.fcntl(fd, F_PUNCHHOLE, struct.pack("=IIqq", 0, 0, 1 << 20, 1 << 20))
         finally:
             os.close(fd)
 
-    changes = [("rewriting a block with the same bytes", rewrite_same),
-               ("rewriting a block with other bytes", rewrite_other),
-               ("appending", append), ("truncating then regrowing", truncate_and_regrow),
-               ("extending with a hole", extend_with_hole), ("a write through a mapping", mmap_write),
-               ("punching a hole", punch_hole)]
+    changes = [
+        ("rewriting a block with the same bytes", rewrite_same),
+        ("rewriting a block with other bytes", rewrite_other),
+        ("appending", append),
+        ("truncating then regrowing", truncate_and_regrow),
+        ("extending with a hole", extend_with_hole),
+        ("a write through a mapping", mmap_write),
+        ("punching a hole", punch_hole),
+    ]
     for label, change in changes:
         for victim, other in ((b, a), (a, b)):
             fresh()
             change(victim)
-            check(f"{label} ({'clone' if victim == b else 'source'}) moves it to a new clone id",
-                  not same_stream(victim, other))
+            check(
+                f"{label} ({'clone' if victim == b else 'source'}) moves it to a new clone id",
+                not same_stream(victim, other),
+            )
 
 
 def test_decoding(root: Path) -> None:
@@ -140,26 +153,40 @@ def test_decoding(root: Path) -> None:
     os.link(d / "f", d / "hard")
     os.symlink("f", d / "link")
     got = {e.name.decode(): e for e in prefilter.list_dir(str(d))}
-    check("decode: every entry listed", sorted(got) == ["empty", "f", "hard", "link", "sub"],
-          str(sorted(got)))
+    check(
+        "decode: every entry listed",
+        sorted(got) == ["empty", "f", "hard", "link", "sub"],
+        str(sorted(got)),
+    )
     st = os.lstat(d / "f")
     f = got["f"]
-    check("decode: a file's type, size, links and device",
-          (f.objtype, f.size, f.nlink, f.dev) == (prefilter.VREG, 12345, 2, st.st_dev),
-          str(f))
+    check(
+        "decode: a file's type, size, links and device",
+        (f.objtype, f.size, f.nlink, f.dev) == (prefilter.VREG, 12345, 2, st.st_dev),
+        str(f),
+    )
     check("decode: an empty file has size 0", got["empty"].size == 0)
-    check("decode: a directory", got["sub"].objtype == prefilter.VDIR and not got["sub"].mounted_on)
-    check("decode: a symlink is neither a file nor a directory",
-          got["link"].objtype not in (prefilter.VREG, prefilter.VDIR))
+    check(
+        "decode: a directory",
+        got["sub"].objtype == prefilter.VDIR and not got["sub"].mounted_on,
+    )
+    check(
+        "decode: a symlink is neither a file nor a directory",
+        got["link"].objtype not in (prefilter.VREG, prefilter.VDIR),
+    )
     many = d / "many"
     many.mkdir()
     for i in range(3000):
         (many / f"file-with-a-longish-name-{i:05d}").write_bytes(b"")
-    check("decode: a directory larger than one buffer", len(prefilter.list_dir(str(many))) == 3000)
+    check(
+        "decode: a directory larger than one buffer",
+        len(prefilter.list_dir(str(many))) == 3000,
+    )
 
 
-def walk(scope: Path, min_size: int = 1, excludes: Optional[list[str]] = None
-         ) -> tuple[list[str], list[list[str]], set[str]]:
+def walk(
+    scope: Path, min_size: int = 1, excludes: list[str] | None = None
+) -> tuple[list[str], list[list[str]], set[str]]:
     """What the prefilter offers fclones, its withheld sets, and every file fclones
     reaches from what it was offered (a directory is walked whole)."""
     w = prefilter.Walk(str(scope), min_size, excludes or [])
@@ -169,16 +196,23 @@ def walk(scope: Path, min_size: int = 1, excludes: Optional[list[str]] = None
     for p in offered:
         if os.path.isdir(p) and not os.path.islink(p):
             for d, _dirs, files in os.walk(p):
-                reach.update(os.path.join(d, f) for f in files
-                             if not os.path.islink(os.path.join(d, f)))
+                reach.update(
+                    os.path.join(d, f)
+                    for f in files
+                    if not os.path.islink(os.path.join(d, f))
+                )
         else:
             reach.add(p)
     return offered, [files for _size, files in w.sets()], reach
 
 
 def all_files(scope: Path) -> set[str]:
-    return {os.path.join(d, f) for d, _dirs, files in os.walk(scope) for f in files
-            if not os.path.islink(os.path.join(d, f))}
+    return {
+        os.path.join(d, f)
+        for d, _dirs, files in os.walk(scope)
+        for f in files
+        if not os.path.islink(os.path.join(d, f))
+    }
 
 
 def test_walk(root: Path) -> None:
@@ -193,20 +227,39 @@ def test_walk(root: Path) -> None:
     (d / "deep" / "er" / "sibling").write_bytes(b"s")
     (d / "other" / "x" / "y").write_bytes(b"y")
     offered, sets, reach = walk(d)
-    members = sorted(str(p) for p in (d / "a", d / "deep" / "er" / "b", d / "deep" / "c"))
-    check("walk: a clone set is one set", len(sets) == 1 and sorted(sets[0]) == members, str(sets))
+    members = sorted(
+        str(p) for p in (d / "a", d / "deep" / "er" / "b", d / "deep" / "c")
+    )
+    check(
+        "walk: a clone set is one set",
+        len(sets) == 1 and sorted(sets[0]) == members,
+        str(sets),
+    )
     withheld = set(sets[0][1:]) if sets else set()
-    check("walk: fclones reaches exactly the files not withheld",
-          reach == all_files(d) - withheld, str(sorted(reach ^ (all_files(d) - withheld))))
+    check(
+        "walk: fclones reaches exactly the files not withheld",
+        reach == all_files(d) - withheld,
+        str(sorted(reach ^ (all_files(d) - withheld))),
+    )
     check("walk: the set's first file is offered", bool(sets) and sets[0][0] in reach)
-    check("walk: the file offered is the set's lowest inode, as fclones orders a group",
-          bool(sets) and sets[0][0] == min(members, key=lambda p: os.lstat(p).st_ino))
-    check("walk: a subtree holding nothing withheld is offered as one directory",
-          str(d / "other") in offered and not any(p.startswith(str(d / "other") + "/") for p in offered),
-          str(offered))
+    check(
+        "walk: the file offered is the set's lowest inode, as fclones orders a group",
+        bool(sets) and sets[0][0] == min(members, key=lambda p: os.lstat(p).st_ino),
+    )
+    check(
+        "walk: a subtree holding nothing withheld is offered as one directory",
+        str(d / "other") in offered
+        and not any(p.startswith(str(d / "other") + "/") for p in offered),
+        str(offered),
+    )
     nothing, sets2, reach2 = walk(d / "other")
-    check("walk: a scope holding nothing withheld is offered as itself",
-          nothing == [str(d / "other")] and not sets2 and reach2 == all_files(d / "other"), str(nothing))
+    check(
+        "walk: a scope holding nothing withheld is offered as itself",
+        nothing == [str(d / "other")]
+        and not sets2
+        and reach2 == all_files(d / "other"),
+        str(nothing),
+    )
 
     # Each of these has a clone, and must still be hashed. One real set keeps
     # the scope split, so the cases are offered on their own.
@@ -235,41 +288,77 @@ def test_walk(root: Path) -> None:
         offered, sets, reach = walk(cases, min_size=100, excludes=["**/ex/**"])
     finally:
         os.chmod(cases / "locked", 0o755)
-    check("walk: the control set is withheld",
-          [sorted(s) for s in sets] == [[str(cases / "set1"), str(cases / "set2")]], str(sets))
-    check("walk: a clone below --min is hashed", {str(cases / "small"), str(cases / "small2")} <= reach)
-    check("walk: a hard-linked clone is hashed",
-          {str(cases / n) for n in ("hard", "hard2", "hard3")} <= reach)
-    check("walk: a pruned exclude is not offered",
-          not any(p.startswith(str(cases / "ex")) for p in offered), str(offered))
-    check("walk: a clone whose twin is excluded is hashed", str(cases / "keep") in reach)
-    check("walk: a directory holding a name stdin cannot carry goes to fclones whole",
-          str(odd) in offered and not any(p.startswith(str(odd) + "/") for p in offered))
-    check("walk: an unreadable directory goes to fclones, which reports it",
-          str(cases / "locked") in offered)
+    check(
+        "walk: the control set is withheld",
+        [sorted(s) for s in sets] == [[str(cases / "set1"), str(cases / "set2")]],
+        str(sets),
+    )
+    check(
+        "walk: a clone below --min is hashed",
+        {str(cases / "small"), str(cases / "small2")} <= reach,
+    )
+    check(
+        "walk: a hard-linked clone is hashed",
+        {str(cases / n) for n in ("hard", "hard2", "hard3")} <= reach,
+    )
+    check(
+        "walk: a pruned exclude is not offered",
+        not any(p.startswith(str(cases / "ex")) for p in offered),
+        str(offered),
+    )
+    check(
+        "walk: a clone whose twin is excluded is hashed", str(cases / "keep") in reach
+    )
+    check(
+        "walk: a directory holding a name stdin cannot carry goes to fclones whole",
+        str(odd) in offered and not any(p.startswith(str(odd) + "/") for p in offered),
+    )
+    check(
+        "walk: an unreadable directory goes to fclones, which reports it",
+        str(cases / "locked") in offered,
+    )
 
     # A compressed clone set is hashed: decmpfs keeps the bytes outside the stream.
     comp = root / "compressed"
     comp.mkdir()
     (comp / "src").write_bytes(b"compress me " * 50000)
-    subprocess.run(["ditto", "--hfsCompression", str(comp / "src"), str(comp / "z")], check=True)
+    subprocess.run(
+        ["ditto", "--hfsCompression", str(comp / "src"), str(comp / "z")], check=True
+    )
     clone(comp / "z", comp / "z2")
     compressed = bool(os.lstat(comp / "z").st_flags & prefilter.UF_COMPRESSED)
     offered, sets, reach = walk(comp)
-    check("walk: a compressed clone set is hashed",
-          not compressed or ({str(comp / "z"), str(comp / "z2")} <= reach and not sets),
-          f"compressed={compressed} sets={sets}")
+    check(
+        "walk: a compressed clone set is hashed",
+        not compressed or ({str(comp / "z"), str(comp / "z2")} <= reach and not sets),
+        f"compressed={compressed} sets={sets}",
+    )
 
 
 def fclones_kept(scope: Path, paths: list[Path], excludes: list[str]) -> set[str]:
     """Which of paths fclones keeps on --stdin input with these excludes. All the
     files hold the same bytes, so every kept file lands in one group."""
-    args = ["fclones", "group", "--stdin", "--no-ignore", "--hidden", "--min", "1",
-            "--format", "json"]
+    args = [
+        "fclones",
+        "group",
+        "--stdin",
+        "--no-ignore",
+        "--hidden",
+        "--min",
+        "1",
+        "--format",
+        "json",
+    ]
     for g in excludes:
         args += ["--exclude", g]
-    r = subprocess.run(args, input="".join(f"{p}\n" for p in paths), capture_output=True,
-                       text=True, check=True, cwd=scope)
+    r = subprocess.run(
+        args,
+        input="".join(f"{p}\n" for p in paths),
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=scope,
+    )
     groups = json.loads(r.stdout)["groups"]
     return {f for g in groups for f in g["files"]}
 
@@ -278,37 +367,83 @@ def test_excludes_against_fclones(root: Path) -> None:
     """_MightExclude must flag every path fclones drops, and _Prune must prune only
     directories whose files fclones drops; both are checked on fclones itself."""
     d = root / "globs"
-    rels = ["a/target/x", "a/targetx/y", "a/b/target", "Library/Mobile Documents/z",
-            "Library/Mobile DocumentsX/z", "p/foo.photoslibrary/w", "p/foophotoslibrary/w",
-            ".Trash/v", "u", "plain/t", "plain/sub/s", "q/[x]/r", "brace/ab/c", "brace/ad/c",
-            "deep/one/two/three"]
+    rels = [
+        "a/target/x",
+        "a/targetx/y",
+        "a/b/target",
+        "Library/Mobile Documents/z",
+        "Library/Mobile DocumentsX/z",
+        "p/foo.photoslibrary/w",
+        "p/foophotoslibrary/w",
+        ".Trash/v",
+        "u",
+        "plain/t",
+        "plain/sub/s",
+        "q/[x]/r",
+        "brace/ab/c",
+        "brace/ad/c",
+        "deep/one/two/three",
+    ]
     paths = [d / r for r in rels]
     for p in paths:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(b"same\n" * 10)
-    patterns = ["**/target/**", "**/Library/Mobile Documents/**", "**/*.photoslibrary/**",
-                "**/.Trash/**", "plain/*", "**/\\[x\\]/**", "**/brace/a{b,c}/**", "**/one/*/three",
-                "*.nothing"]
+    patterns = [
+        "**/target/**",
+        "**/Library/Mobile Documents/**",
+        "**/*.photoslibrary/**",
+        "**/.Trash/**",
+        "plain/*",
+        "**/\\[x\\]/**",
+        "**/brace/a{b,c}/**",
+        "**/one/*/three",
+        "*.nothing",
+    ]
     kept = fclones_kept(d, paths, patterns)
-    check("globs: fclones keeps some and drops some", 0 < len(kept) < len(paths), str(sorted(kept)))
+    check(
+        "globs: fclones keeps some and drops some",
+        0 < len(kept) < len(paths),
+        str(sorted(kept)),
+    )
     might = prefilter._MightExclude(patterns)  # pyright: ignore[reportPrivateUsage]
     missed = [str(p) for p in paths if str(p) not in kept and not might.matches(str(p))]
-    check("globs: every path fclones drops is flagged (superset)", not missed, str(missed))
+    check(
+        "globs: every path fclones drops is flagged (superset)", not missed, str(missed)
+    )
     prune = prefilter._Prune(patterns)  # pyright: ignore[reportPrivateUsage]
-    wrongly = [str(p) for p in paths if any(prune.matches(str(a)) for a in p.parents)
-               and str(p) in kept]
-    check("globs: pruning drops nothing fclones keeps (subset)", not wrongly, str(wrongly))
-    check("globs: the default directory excludes are pruned",
-          all(prune.matches(str(d / r)) for r in ["a/target", "Library/Mobile Documents",
-                                                 "p/foo.photoslibrary", ".Trash"]))
+    wrongly = [
+        str(p)
+        for p in paths
+        if any(prune.matches(str(a)) for a in p.parents) and str(p) in kept
+    ]
+    check(
+        "globs: pruning drops nothing fclones keeps (subset)", not wrongly, str(wrongly)
+    )
+    check(
+        "globs: the default directory excludes are pruned",
+        all(
+            prune.matches(str(d / r))
+            for r in [
+                "a/target",
+                "Library/Mobile Documents",
+                "p/foo.photoslibrary",
+                ".Trash",
+            ]
+        ),
+    )
 
 
 def test_min() -> None:
     check("min: a bare number is bytes", prefilter.parse_min("100000") == 100000)
-    check("min: 1M is at least fclones' reading", (prefilter.parse_min("1M") or 0) >= 1000000)
+    check(
+        "min: 1M is at least fclones' reading",
+        (prefilter.parse_min("1M") or 0) >= 1000000,
+    )
     check("min: 1MiB is binary", prefilter.parse_min("1MiB") == 1 << 20)
-    check("min: nonsense is refused", prefilter.parse_min("1Q") is None and
-          prefilter.parse_min("x") is None)
+    check(
+        "min: nonsense is refused",
+        prefilter.parse_min("1Q") is None and prefilter.parse_min("x") is None,
+    )
 
 
 def test_merge() -> None:
@@ -316,12 +451,22 @@ def test_merge() -> None:
     groups = [[F("/c"), F("/r")], [F("/x"), F("/y")]]
     shared = [[F("/r"), F("/r2"), F("/r3")], [F("/s"), F("/s2")]]
     merged = engine.merge_shared(groups, shared)
-    check("merge: withheld clones join their file's group",
-          merged[0] == [F("/c"), F("/r"), F("/r2"), F("/r3")], str(merged))
-    check("merge: an untouched group is kept as it was", merged[1] == [F("/x"), F("/y")])
-    check("merge: a set fclones grouped with nothing is a group of its own",
-          merged[2] == [F("/s"), F("/s2")] and len(merged) == 3, str(merged))
-    check("merge: the report's groups are not modified", groups[0] == [F("/c"), F("/r")])
+    check(
+        "merge: withheld clones join their file's group",
+        merged[0] == [F("/c"), F("/r"), F("/r2"), F("/r3")],
+        str(merged),
+    )
+    check(
+        "merge: an untouched group is kept as it was", merged[1] == [F("/x"), F("/y")]
+    )
+    check(
+        "merge: a set fclones grouped with nothing is a group of its own",
+        merged[2] == [F("/s"), F("/s2")] and len(merged) == 3,
+        str(merged),
+    )
+    check(
+        "merge: the report's groups are not modified", groups[0] == [F("/c"), F("/r")]
+    )
 
 
 def main() -> int:

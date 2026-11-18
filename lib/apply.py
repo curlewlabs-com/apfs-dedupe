@@ -1312,8 +1312,9 @@ class _SharedReport(TypedDict):
     groups: list[_FclonesGroup]
 
 
-def merge_shared(groups: list[list[FullPath]], shared: Sequence[list[FullPath]]
-                 ) -> list[list[FullPath]]:
+def merge_shared(
+    groups: list[list[FullPath]], shared: Sequence[list[FullPath]]
+) -> list[list[FullPath]]:
     """The report's groups with the prefilter's withheld clones put back. Each
     shared set is [offered, withheld...]: fclones hashed only the first, so the rest
     join whichever group that file landed in, or, if fclones found it no duplicate
@@ -1425,7 +1426,10 @@ def main() -> int:
             shared = shared_report["groups"]
             withheld = shared_report["withheld"]
         except (OSError, ValueError, KeyError, TypeError) as e:
-            print(f"error: could not read prefilter report {args.shared}: {e}", file=sys.stderr)
+            print(
+                f"error: could not read prefilter report {args.shared}: {e}",
+                file=sys.stderr,
+            )
             return 1
 
     # Two channels: the report a user keeps -> stdout, so `> plan.txt` captures it
@@ -1453,8 +1457,10 @@ def main() -> int:
     total_already_shared = 0
     total_already_shared_logical = 0
     total_already_shared_allocated = 0
-    file_groups = merge_shared([g["files"] for g in groups if len(g.get("files", [])) >= 2],
-                               [g["files"] for g in shared])
+    file_groups = merge_shared(
+        [g["files"] for g in groups if len(g.get("files", [])) >= 2],
+        [g["files"] for g in shared],
+    )
     file_count = sum(map(len, file_groups))
     workers = _inspect_workers()
     if file_count:
@@ -1499,7 +1505,9 @@ def main() -> int:
             f"in {stats.get('redundant_file_count', '?')} files"
         )
     if withheld:
-        print(f"not re-hashed: {withheld} files already sharing storage with an identical file")
+        print(
+            f"not re-hashed: {withheld} files already sharing storage with an identical file"
+        )
     # Space earlier runs already saved: duplicates we found still sharing
     # storage from a prior clone, left untouched this run (see dedupe_group).
     if total_already_shared:
