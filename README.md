@@ -187,9 +187,11 @@ cannot be affected. For most trees that should not be necessary.
 ## Requirements
 
 Requires macOS on Apple silicon (APFS), `fclones`, and **Python 3.12 or newer**
-as `python3` on `PATH` (for example `brew install python`). The `/usr/bin/python3`
-macOS ships is older, and both `apfs-dedupe.sh` and `install-daily.sh` refuse it
-with a message. `--apply` additionally requires **macOS
+(for example `brew install python`). Both `apfs-dedupe.sh` and
+`install-daily.sh` take `python3` from `PATH` when it is new enough, and
+otherwise look for one in Homebrew's prefixes (`/opt/homebrew/bin`, then
+`/usr/local/bin`). The `/usr/bin/python3` macOS ships is older; if nothing newer
+is found, both refuse with a message naming where they looked. `--apply` additionally requires **macOS
 15+**: it uses `CLONE_NOFOLLOW_ANY` for symlink-safe path resolution, which
 Apple's headers first define in macOS 15, and refuses to run on older systems.
 Dry-run uses none of that and works on any macOS version.
@@ -347,6 +349,11 @@ that log size-capped and gzipped - macOS's own rotator, with archives kept
 `root:wheel 0600` like the log itself. The default system floor is `--min 1M` for
 whole-machine recurring runs; pass `--min 1` if you want the daemon to scan every
 non-empty file daily.
+
+Under `sudo`, `PATH` leaves out Homebrew's prefixes, so `python3` there is the
+system's older one. The installer then takes the first Python 3.12 or newer in
+`/opt/homebrew/bin` or `/usr/local/bin` instead, and records that interpreter's
+absolute path in the job, so no `PATH` needs passing through `sudo`.
 
 Known limitation: `--system` stores this checkout's script path, the installer
 shell's `fclones` search path and the absolute path of its `python3` in a root

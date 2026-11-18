@@ -306,32 +306,25 @@ command -v fclones >/dev/null 2>&1 || {
     echo "error: fclones not found -- install with: brew install fclones" >&2
     exit 1
 }
-# The engine needs Python 3.12 or newer. A scheduled job names the interpreter
-# install-daily.sh found in APFS_DEDUPE_PYTHON, since launchd starts it with a
-# PATH of its own; a run from a shell takes python3 from PATH.
-PYTHON=${APFS_DEDUPE_PYTHON:-python3}
-command -v "$PYTHON" >/dev/null 2>&1 || {
-    echo "error: $PYTHON not found -- apfs-dedupe needs Python 3.12 or newer (for example: brew install python)." >&2
-    exit 1
-}
-"$PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 12))' 2>/dev/null || {
-    echo "error: $(command -v "$PYTHON") is older than Python 3.12, which apfs-dedupe needs." >&2
-    echo "       Put a newer python3 first on PATH (for example: brew install python); for a" >&2
-    echo "       scheduled run, then re-run install-daily.sh so the job records it." >&2
-    exit 1
-}
-
-# Reading other users' files under /Users requires root; without it fclones
-# silently skips what it cannot read, undercounting savings.
-if [ "$(id -u)" -ne 0 ] && [ "$SCOPE" = "/Users" ]; then
-    echo "note: not running as root; files you cannot read will be skipped. Use sudo for /Users." >&2
-fi
 
 HERE=$(
     unset CDPATH
     cd -- "$(dirname -- "$0")" && pwd
 )
 APPLY_ENGINE="$HERE/lib/apply.py"
+
+# The engine needs Python 3.12 or newer. A scheduled job names the interpreter
+# install-daily.sh found in APFS_DEDUPE_PYTHON; see lib/python.sh for where
+# find_python looks otherwise.
+# shellcheck source=lib/python.sh
+. "$HERE/lib/python.sh"
+find_python || exit 1
+
+# Reading other users' files under /Users requires root; without it fclones
+# silently skips what it cannot read, undercounting savings.
+if [ "$(id -u)" -ne 0 ] && [ "$SCOPE" = "/Users" ]; then
+    echo "note: not running as root; files you cannot read will be skipped. Use sudo for /Users." >&2
+fi
 
 # Clones and displaced files wait here, outside the trees being deduped; see
 # _open_work_dir in lib/apply.py. It sits under the scope so it is on the same
