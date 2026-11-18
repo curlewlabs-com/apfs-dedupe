@@ -1,6 +1,6 @@
 {
   "include": ["lib"],
   "typeCheckingMode": "strict",
-  "pythonVersion": "3.9",
+  "pythonVersion": "3.12",
   "pythonPlatform": "Darwin"
 }

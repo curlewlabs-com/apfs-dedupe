@@ -1,0 +1,14 @@
+# Tool configuration only: apfs-dedupe is not a Python package, and runs from
+# its checkout.
+
+[tool.ruff]
+# The oldest Python the engine and its tests support.
+target-version = "py312"
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["lib"]

@@ -45,6 +45,7 @@ to minutes on a large run, easily long enough for a build to rewrite an artifact
 
 macOS / APFS only. See docs/architecture.md for the full rationale.
 """
+
 import argparse
 import collections
 import concurrent.futures
@@ -65,7 +66,7 @@ import struct
 import sys
 import time
 from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
-from typing import NamedTuple, NewType, NoReturn, Optional, TypedDict, cast
+from typing import NamedTuple, NewType, NoReturn, TypedDict, cast
 
 # A path that resolves on its own -- absolute, or relative to the process cwd --
 # so it is safe to hand to a path-based syscall and to name a file in a
@@ -151,16 +152,16 @@ PROX_FDTYPE_VNODE = 1
 # fi_openflags bit, from the kernel's <sys/fcntl.h>: the fd was opened for writing.
 FWRITE = 0x0002
 VM_PROT_WRITE = 0x02
-_FDINFO = struct.Struct("=iI")          # struct proc_fdinfo: proc_fd, proc_fdtype
-_VNODE_FDINFO_SIZE = 176                # struct vnode_fdinfo
-_VNODE_FLAGS = struct.Struct("=I")      # pfi.fi_openflags, at offset 0
-_VNODE_ID = struct.Struct("=I4xQ")      # pvi.vi_stat.vst_dev, vst_ino, at offset 24
+_FDINFO = struct.Struct("=iI")  # struct proc_fdinfo: proc_fd, proc_fdtype
+_VNODE_FDINFO_SIZE = 176  # struct vnode_fdinfo
+_VNODE_FLAGS = struct.Struct("=I")  # pfi.fi_openflags, at offset 0
+_VNODE_ID = struct.Struct("=I4xQ")  # pvi.vi_stat.vst_dev, vst_ino, at offset 24
 _VNODE_ID_OFFSET = 24
-_REGION_SIZE = 1272                     # struct proc_regionwithpathinfo
-_REGION_PROT = struct.Struct("=I")      # pri_protection, at offset 0
-_REGION_SPAN = struct.Struct("=QQ")     # pri_address, pri_size, at offset 80
+_REGION_SIZE = 1272  # struct proc_regionwithpathinfo
+_REGION_PROT = struct.Struct("=I")  # pri_protection, at offset 0
+_REGION_SPAN = struct.Struct("=QQ")  # pri_address, pri_size, at offset 80
 _REGION_SPAN_OFFSET = 80
-_REGION_ID = struct.Struct("=I4xQ")     # vst_dev, vst_ino, at offset 96
+_REGION_ID = struct.Struct("=I4xQ")  # vst_dev, vst_ino, at offset 96
 _REGION_ID_OFFSET = 96
 # Displaced files wait in the work directory for one writer scan, so each scan
 # settles many swaps. A scan costs tens of milliseconds, and a first run over a
@@ -190,36 +191,60 @@ PROGRESS_SECONDS = 60.0
 _lib = ctypes.CDLL(ctypes.util.find_library("System"), use_errno=True)
 # int clonefileat(int src_dirfd, const char *src, int dst_dirfd,
 #                 const char *dst, uint32_t flags)              <sys/clonefile.h>
-_lib.clonefileat.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
-                             ctypes.c_char_p, ctypes.c_uint32)
+_lib.clonefileat.argtypes = (
+    ctypes.c_int,
+    ctypes.c_char_p,
+    ctypes.c_int,
+    ctypes.c_char_p,
+    ctypes.c_uint32,
+)
 _lib.clonefileat.restype = ctypes.c_int
 # int fcopyfile(int from_fd, int to_fd, copyfile_state_t, copyfile_flags_t)
 _lib.fcopyfile.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
 _lib.fcopyfile.restype = ctypes.c_int
 # int renameatx_np(int fromfd, const char *from, int tofd, const char *to,
 #                  unsigned int flags)                              <stdio.h>
-_lib.renameatx_np.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
-                              ctypes.c_char_p, ctypes.c_uint)
+_lib.renameatx_np.argtypes = (
+    ctypes.c_int,
+    ctypes.c_char_p,
+    ctypes.c_int,
+    ctypes.c_char_p,
+    ctypes.c_uint,
+)
 _lib.renameatx_np.restype = ctypes.c_int
 # int proc_listallpids(void *buffer, int buffersize)                <libproc.h>
 _lib.proc_listallpids.argtypes = (ctypes.c_void_p, ctypes.c_int)
 _lib.proc_listallpids.restype = ctypes.c_int
 # int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buf, int size)
-_lib.proc_pidinfo.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
-                              ctypes.c_void_p, ctypes.c_int)
+_lib.proc_pidinfo.argtypes = (
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_uint64,
+    ctypes.c_void_p,
+    ctypes.c_int,
+)
 _lib.proc_pidinfo.restype = ctypes.c_int
 # int proc_pidfdinfo(int pid, int fd, int flavor, void *buf, int size)
-_lib.proc_pidfdinfo.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_int,
-                                ctypes.c_void_p, ctypes.c_int)
+_lib.proc_pidfdinfo.argtypes = (
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_void_p,
+    ctypes.c_int,
+)
 _lib.proc_pidfdinfo.restype = ctypes.c_int
 # int proc_name(int pid, void *buffer, uint32_t buffersize)
 _lib.proc_name.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
 _lib.proc_name.restype = ctypes.c_int
 # int sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp,
 #                  size_t newlen)                                   <sys/sysctl.h>
-_lib.sysctlbyname.argtypes = (ctypes.c_char_p, ctypes.c_void_p,
-                              ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p,
-                              ctypes.c_size_t)
+_lib.sysctlbyname.argtypes = (
+    ctypes.c_char_p,
+    ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_size_t),
+    ctypes.c_void_p,
+    ctypes.c_size_t,
+)
 _lib.sysctlbyname.restype = ctypes.c_int
 
 
@@ -234,8 +259,16 @@ def _clonefileat(src_abs: FullPath, dst_dirfd: int, dst_name: Basename) -> None:
     cannot redirect where the clone lands; CLONE_NOFOLLOW_ANY refuses a symlink
     anywhere in the source path (or as the destination), so the source cannot be
     redirected either."""
-    if _lib.clonefileat(AT_FDCWD, os.fsencode(src_abs),
-                        dst_dirfd, os.fsencode(dst_name), CLONE_NOFOLLOW_ANY) != 0:
+    if (
+        _lib.clonefileat(
+            AT_FDCWD,
+            os.fsencode(src_abs),
+            dst_dirfd,
+            os.fsencode(dst_name),
+            CLONE_NOFOLLOW_ANY,
+        )
+        != 0
+    ):
         _raise_errno()
 
 
@@ -246,11 +279,21 @@ def _fcopy_metadata(src_fd: int, dst_fd: int) -> None:
         _raise_errno()
 
 
-def _swap(from_dirfd: int, from_name: Basename, to_dirfd: int, to_name: Basename) -> None:
+def _swap(
+    from_dirfd: int, from_name: Basename, to_dirfd: int, to_name: Basename
+) -> None:
     """Exchange two names atomically. Both resolve against dir fds, for the same
     reason every other step does."""
-    if _lib.renameatx_np(from_dirfd, os.fsencode(from_name), to_dirfd,
-                         os.fsencode(to_name), RENAME_SWAP) != 0:
+    if (
+        _lib.renameatx_np(
+            from_dirfd,
+            os.fsencode(from_name),
+            to_dirfd,
+            os.fsencode(to_name),
+            RENAME_SWAP,
+        )
+        != 0
+    ):
         _raise_errno()
 
 
@@ -277,7 +320,9 @@ def _open_work_dir(path: FullPath) -> int:
     st = os.fstat(fd)
     if st.st_uid != os.geteuid() or stat.S_IMODE(st.st_mode) & 0o077:
         os.close(fd)
-        raise PermissionError(errno.EPERM, "work directory is not private to this user", path)
+        raise PermissionError(
+            errno.EPERM, "work directory is not private to this user", path
+        )
     return fd
 
 
@@ -332,7 +377,7 @@ def _same_content_fd(fa: int, fb: int, bufsize: int = 1 << 20) -> bool:
             return True
 
 
-def _extent_map(fd: int) -> Optional[tuple[int, tuple[tuple[int, int], ...]]]:
+def _extent_map(fd: int) -> tuple[int, tuple[tuple[int, int], ...]] | None:
     """(device id, full extent map) of the file's storage, or None if the layout
     cannot be determined. The map is the ordered tuple of (device_offset, run)
     segments backing the file from byte 0 to EOF, a hole written as (_HOLE, run)
@@ -377,10 +422,10 @@ def _extent_map(fd: int) -> Optional[tuple[int, tuple[tuple[int, int], ...]]]:
         try:
             res = fcntl.fcntl(fd, F_LOG2PHYS_EXT, buf)
         except OSError:
-            return None   # ENOTSUP (compressed / SIP-protected), ERANGE, ... -> unknown
+            return None  # ENOTSUP (compressed / SIP-protected), ERANGE, ... -> unknown
         _flags, run, devoff = struct.unpack(_LOG2PHYS_FMT, res)
         if run <= 0:
-            return None   # no forward progress -> the map cannot be trusted
+            return None  # no forward progress -> the map cannot be trusted
         segments.append((_HOLE if devoff < 0 else devoff, run))
         offset += run
     # The walk must land exactly on EOF; a run that overshot means the mapping
@@ -390,7 +435,7 @@ def _extent_map(fd: int) -> Optional[tuple[int, tuple[tuple[int, int], ...]]]:
     return (st.st_dev, tuple(segments))
 
 
-def _extent_map_of(path: FullPath) -> Optional[tuple[int, tuple[tuple[int, int], ...]]]:
+def _extent_map_of(path: FullPath) -> tuple[int, tuple[tuple[int, int], ...]] | None:
     """_extent_map for a path: open it read-only -- refusing a final-component
     symlink -- and map it, returning None on any open failure (gone, no
     permission, a symlink raced in after the lstat). O_NOFOLLOW (not
@@ -415,16 +460,21 @@ def _is_dataless(st_flags: int) -> bool:
     return bool(st_flags & SF_DATALESS)
 
 
-def _sysctl_int(name: str) -> Optional[int]:
+def _sysctl_int(name: str) -> int | None:
     """The named 32-bit sysctl, or None if this Mac does not have it."""
     value = ctypes.c_int32()
     size = ctypes.c_size_t(ctypes.sizeof(value))
-    if _lib.sysctlbyname(name.encode(), ctypes.byref(value), ctypes.byref(size), None, 0) != 0:
+    if (
+        _lib.sysctlbyname(
+            name.encode(), ctypes.byref(value), ctypes.byref(size), None, 0
+        )
+        != 0
+    ):
         return None
     return value.value
 
 
-def _inspect_workers(read: Callable[[str], Optional[int]] = _sysctl_int) -> int:
+def _inspect_workers(read: Callable[[str], int | None] = _sysctl_int) -> int:
     """How many threads inspect files: one per efficiency core, or 1 on a Mac
     without them. The scheduled run is a background job that macOS keeps on those
     cores, so more threads than that would only wait on each other, and a run
@@ -441,9 +491,10 @@ class _Inspected(NamedTuple):
     """What one file looked like when a thread read it, which may no longer be
     true by the time the apply reaches it. Only good for deciding to leave a file
     alone: dedupe_group looks again before changing anything."""
-    st: Optional[os.stat_result]
-    error: Optional[OSError]
-    extent_map: Optional[tuple[int, tuple[tuple[int, int], ...]]]
+
+    st: os.stat_result | None
+    error: OSError | None
+    extent_map: tuple[int, tuple[tuple[int, int], ...]] | None
 
 
 def _inspect(path: FullPath) -> _Inspected:
@@ -471,7 +522,9 @@ def _inspect_stream(paths: Iterable[FullPath], workers: int) -> Iterator[_Inspec
         return
     remaining = iter(paths)
     with concurrent.futures.ThreadPoolExecutor(workers) as pool:
-        queue: collections.deque[concurrent.futures.Future[list[_Inspected]]] = collections.deque()
+        queue: collections.deque[concurrent.futures.Future[list[_Inspected]]] = (
+            collections.deque()
+        )
         while True:
             while len(queue) < workers * INSPECT_QUEUE_PER_WORKER:
                 chunk = list(itertools.islice(remaining, INSPECT_CHUNK))
@@ -483,8 +536,9 @@ def _inspect_stream(paths: Iterable[FullPath], workers: int) -> Iterator[_Inspec
             yield from queue.popleft().result()
 
 
-def _inspect_groups(groups: Sequence[list[FullPath]], workers: int
-                    ) -> Iterator[tuple[list[FullPath], list[_Inspected]]]:
+def _inspect_groups(
+    groups: Sequence[list[FullPath]], workers: int
+) -> Iterator[tuple[list[FullPath], list[_Inspected]]]:
     """Each group with its files' inspections, in report order. The stream is by
     file rather than by group because one group can hold most of a report, and
     per-group tasks would leave that group on a single thread."""
@@ -496,6 +550,7 @@ def _inspect_groups(groups: Sequence[list[FullPath]], workers: int
 class _BlindSpot(NamedTuple):
     """A process the scan could not read, kept as what a person needs to act on
     it: which process, and why. A pid of 0 means the process list itself failed."""
+
     pid: int
     name: str
     reason: str
@@ -504,6 +559,7 @@ class _BlindSpot(NamedTuple):
 class _WriterScan(NamedTuple):
     """Every file some process could still write, and each process we could not
     inspect, which is every other user's process when not running as root."""
+
     files: set[tuple[int, int]]
     blind: list[_BlindSpot]
 
@@ -526,8 +582,12 @@ def _add_writable_maps(pid: int, files: set[tuple[int, int]]) -> None:
     count too: telling them from shared ones gains little, and the only cost is
     leaving a file that is in use out of this run."""
     address = 0
-    while _lib.proc_pidinfo(pid, PROC_PIDREGIONPATHINFO, address, _region_buf,
-                            _REGION_SIZE) == _REGION_SIZE:
+    while (
+        _lib.proc_pidinfo(
+            pid, PROC_PIDREGIONPATHINFO, address, _region_buf, _REGION_SIZE
+        )
+        == _REGION_SIZE
+    ):
         if _REGION_PROT.unpack_from(_region_buf, 0)[0] & VM_PROT_WRITE:
             dev, ino = _REGION_ID.unpack_from(_region_buf, _REGION_ID_OFFSET)
             if ino:
@@ -565,13 +625,21 @@ def _scan_writers(maps: bool) -> _WriterScan:
                 blind.append(_BlindSpot(pid, _process_name(pid), os.strerror(error)))
             continue
         if used >= len(_fd_buf):
-            blind.append(_BlindSpot(pid, _process_name(pid), "more open files than the scan can read"))
+            blind.append(
+                _BlindSpot(
+                    pid, _process_name(pid), "more open files than the scan can read"
+                )
+            )
         for fd, kind in _FDINFO.iter_unpack(memoryview(_fd_buf)[:used]):
-            if kind == PROX_FDTYPE_VNODE and _lib.proc_pidfdinfo(
-                    pid, fd, PROC_PIDFDVNODEINFO, _vnode_buf,
-                    _VNODE_FDINFO_SIZE) == _VNODE_FDINFO_SIZE:
-                if _VNODE_FLAGS.unpack_from(_vnode_buf, 0)[0] & FWRITE:
-                    files.add(_VNODE_ID.unpack_from(_vnode_buf, _VNODE_ID_OFFSET))
+            if (
+                kind == PROX_FDTYPE_VNODE
+                and _lib.proc_pidfdinfo(
+                    pid, fd, PROC_PIDFDVNODEINFO, _vnode_buf, _VNODE_FDINFO_SIZE
+                )
+                == _VNODE_FDINFO_SIZE
+                and _VNODE_FLAGS.unpack_from(_vnode_buf, 0)[0] & FWRITE
+            ):
+                files.add(_VNODE_ID.unpack_from(_vnode_buf, _VNODE_ID_OFFSET))
         if maps:
             _add_writable_maps(pid, files)
     return _WriterScan(files, blind)
@@ -596,8 +664,10 @@ def _writer_scan_works(work_fd: int) -> bool:
             st_opened = os.fstat(open_fd)
             st_mapped = os.stat(mapped, dir_fd=work_fd)
             files = _scan_writers(maps=True).files
-            return ((st_opened.st_dev, st_opened.st_ino) in files
-                    and (st_mapped.st_dev, st_mapped.st_ino) in files)
+            return (st_opened.st_dev, st_opened.st_ino) in files and (
+                st_mapped.st_dev,
+                st_mapped.st_ino,
+            ) in files
         finally:
             mapping.close()
     finally:
@@ -613,6 +683,7 @@ class SkipKind(enum.Enum):
     Knowing the reason there lets the run summary break skips down -- and advise
     on the one the user can fix -- without re-parsing log lines. Definition order
     is the order the summary lists them."""
+
     PERMISSION = "permission"
     SYMLINK = "symlink"
     HARD_LINKED = "hardlink"
@@ -681,8 +752,14 @@ class _Progress:
     summary. A percentage, not a time remaining: a report starts with its biggest
     files, so the early rate says little about the rest of the run."""
 
-    def __init__(self, total: int, swaps: "Optional[_Swaps]", skips: _Skips, log: Log,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        total: int,
+        swaps: "_Swaps | None",
+        skips: _Skips,
+        log: Log,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._total = total
         self._swaps = swaps
         self._skips = skips
@@ -699,15 +776,18 @@ class _Progress:
             return
         self._next = now + PROGRESS_SECONDS
         cloned = "" if self._swaps is None else f", {self._swaps.cloned} cloned"
-        self._log(f"progress: {self._done} of {self._total} files checked "
-                  f"({self._done * 100 // self._total}%){cloned}, "
-                  f"{self._skips.total()} skipped, "
-                  f"{_human_duration(int(now - self._started))} elapsed")
+        self._log(
+            f"progress: {self._done} of {self._total} files checked "
+            f"({self._done * 100 // self._total}%){cloned}, "
+            f"{self._skips.total()} skipped, "
+            f"{_human_duration(int(now - self._started))} elapsed"
+        )
 
 
 class _FileId(NamedTuple):
     """Enough to tell that a file is the one we looked at and has not been written
     since. ctime is left out on purpose: the swap itself changes it."""
+
     ino: int
     mtime_ns: int
     size: int
@@ -717,7 +797,7 @@ def _file_id(st: os.stat_result) -> _FileId:
     return _FileId(st.st_ino, st.st_mtime_ns, st.st_size)
 
 
-def _file_id_at(name: Basename, dirfd: int) -> Optional[_FileId]:
+def _file_id_at(name: Basename, dirfd: int) -> _FileId | None:
     """The id of whatever name holds right now, or None if nothing does."""
     try:
         return _file_id(os.stat(name, dir_fd=dirfd, follow_symlinks=False))
@@ -728,6 +808,7 @@ def _file_id_at(name: Basename, dirfd: int) -> Optional[_FileId]:
 class _Swap(NamedTuple):
     """One swap waiting for the writer scan. The clone is at dup and the original
     is displaced to tmp in the work directory. It owns dirfd."""
+
     canonical: FullPath
     dup: FullPath
     dirfd: int
@@ -749,8 +830,15 @@ class _Swaps:
     on, it stays in the work directory and the run says so. Totals live here
     because a batch outlives the group that started it."""
 
-    def __init__(self, work_fd: int, work_dir: FullPath, verbose: bool, skips: _Skips,
-                 log: Log, emit: Emit) -> None:
+    def __init__(
+        self,
+        work_fd: int,
+        work_dir: FullPath,
+        verbose: bool,
+        skips: _Skips,
+        log: Log,
+        emit: Emit,
+    ) -> None:
         self._work_fd = work_fd
         self._work_dir = work_dir
         self._verbose = verbose
@@ -777,8 +865,14 @@ class _Swaps:
             self._next_map_scan = now + WRITER_MAP_REFRESH_SECONDS
         return (st.st_dev, st.st_ino) in self._known_writers
 
-    def swap_in(self, canonical: FullPath, dirfd: int, dup: FullPath, dst: os.stat_result,
-                space: str) -> None:
+    def swap_in(
+        self,
+        canonical: FullPath,
+        dirfd: int,
+        dup: FullPath,
+        dst: os.stat_result,
+        space: str,
+    ) -> None:
         """Swap a clone of canonical in at dup. Every privileged step is anchored
         on dirfd and the work fd -- clonefileat/openat/renameatx_np, never a
         re-resolved path -- so a local user who owns the parent directory cannot
@@ -801,17 +895,24 @@ class _Swaps:
                 self._skips.add(_oserror_kind(e), dup, str(e))
                 return
             try:
-                with _openfd(dup_name, os.O_RDONLY, dirfd) as src_fd, \
-                     _openfd(tmp_name, os.O_RDWR, self._work_fd) as dst_fd:
+                with (
+                    _openfd(dup_name, os.O_RDONLY, dirfd) as src_fd,
+                    _openfd(tmp_name, os.O_RDWR, self._work_fd) as dst_fd,
+                ):
                     # Re-compare the exact bytes we are about to install (tmp)
                     # against the duplicate's *current* bytes, right before the
                     # swap -- the check that closes the scan-to-apply window.
                     # Never act on a match that went stale.
                     if not _same_content_fd(dst_fd, src_fd):
-                        self._skips.add(SkipKind.CHANGED, dup,
-                                        f"changed since scan, no longer identical to {canonical}")
+                        self._skips.add(
+                            SkipKind.CHANGED,
+                            dup,
+                            f"changed since scan, no longer identical to {canonical}",
+                        )
                         return
-                    _fcopy_metadata(src_fd, dst_fd)   # the duplicate's own metadata (incl. ACL)
+                    _fcopy_metadata(
+                        src_fd, dst_fd
+                    )  # the duplicate's own metadata (incl. ACL)
                     displaced = _file_id(os.fstat(src_fd))
                     clone = _file_id(os.fstat(dst_fd))
                 _swap(self._work_fd, tmp_name, dirfd, dup_name)  # atomic
@@ -829,10 +930,25 @@ class _Swaps:
                 os.close(dirfd)
         if not self._pending:
             self._oldest = time.monotonic()
-        self._pending.append(_Swap(canonical, dup, dirfd, dup_name, tmp_name, dst.st_dev,
-                                   displaced, clone, dst.st_size, _allocated_bytes(dst), space))
-        if (len(self._pending) >= SETTLE_MAX_PENDING
-                or time.monotonic() - self._oldest >= SETTLE_MAX_SECONDS):
+        self._pending.append(
+            _Swap(
+                canonical,
+                dup,
+                dirfd,
+                dup_name,
+                tmp_name,
+                dst.st_dev,
+                displaced,
+                clone,
+                dst.st_size,
+                _allocated_bytes(dst),
+                space,
+            )
+        )
+        if (
+            len(self._pending) >= SETTLE_MAX_PENDING
+            or time.monotonic() - self._oldest >= SETTLE_MAX_SECONDS
+        ):
             self.flush()
 
     def flush(self) -> None:
@@ -857,13 +973,19 @@ class _Swaps:
 
     def _settle(self, s: _Swap, writers: set[tuple[int, int]], unsure: bool) -> None:
         held = (s.dev, s.displaced.ino) in writers
-        original_unchanged = not unsure and not held and _file_id_at(s.tmp_name, self._work_fd) == s.displaced
+        original_unchanged = (
+            not unsure
+            and not held
+            and _file_id_at(s.tmp_name, self._work_fd) == s.displaced
+        )
         path_is_clone = _file_id_at(s.dup_name, s.dirfd) == s.clone
         if original_unchanged and path_is_clone:
             # The ids cannot see a write through a mapping, which reaches mtime
             # late, so the bytes get the last word.
-            with _openfd(s.tmp_name, os.O_RDONLY, self._work_fd) as tmp_fd, \
-                 _openfd(s.dup_name, os.O_RDONLY, s.dirfd) as dup_fd:
+            with (
+                _openfd(s.tmp_name, os.O_RDONLY, self._work_fd) as tmp_fd,
+                _openfd(s.dup_name, os.O_RDONLY, s.dirfd) as dup_fd,
+            ):
                 original_unchanged = _same_content_fd(tmp_fd, dup_fd)
         if original_unchanged:
             os.unlink(s.tmp_name, dir_fd=self._work_fd)
@@ -876,9 +998,17 @@ class _Swaps:
             else:
                 # Someone wrote the path after the swap. Theirs is the newest
                 # version, so it stands and the old original is not needed.
-                self._skips.add(SkipKind.CHANGED, s.dup, "written after the swap; left as written")
+                self._skips.add(
+                    SkipKind.CHANGED, s.dup, "written after the swap; left as written"
+                )
         elif path_is_clone:
-            kind = SkipKind.IN_USE if held else SkipKind.UNVERIFIED if unsure else SkipKind.CHANGED
+            kind = (
+                SkipKind.IN_USE
+                if held
+                else SkipKind.UNVERIFIED
+                if unsure
+                else SkipKind.CHANGED
+            )
             self._undo(s, kind)
         else:
             self._keep(s, "the path and the original both changed during the swap")
@@ -887,15 +1017,19 @@ class _Swaps:
         _swap(self._work_fd, s.tmp_name, s.dirfd, s.dup_name)
         if _file_id_at(s.tmp_name, self._work_fd) == s.clone:
             os.unlink(s.tmp_name, dir_fd=self._work_fd)
-            self._skips.add(kind, s.dup, "changed or held open during the swap; restored")
+            self._skips.add(
+                kind, s.dup, "changed or held open during the swap; restored"
+            )
         else:
             self._keep(s, "the path changed while the original was being restored")
 
     def _keep(self, s: _Swap, why: str) -> None:
         """The one outcome that needs a person: two versions exist and nothing can
         say which matters, so neither is deleted. Logged whatever the verbosity."""
-        self._log(f"warning: {s.dup}: {why}. Check {self._work_dir}/{s.tmp_name}; "
-                  f"it may hold data that is not at that path.")
+        self._log(
+            f"warning: {s.dup}: {why}. Check {self._work_dir}/{s.tmp_name}; "
+            f"it may hold data that is not at that path."
+        )
         self._skips.add(SkipKind.KEPT, s.dup, why)
 
     def blind_report(self, is_root: bool, skipped: int) -> list[str]:
@@ -906,21 +1040,37 @@ class _Swaps:
         if not self.blind:
             return []
         if not is_root:
-            return [f"note: not running as root, so {len(self.blind)} processes owned by other "
-                    "users or the system could not be checked for open files.",
+            return [
+                (
+                    f"note: not running as root, so {len(self.blind)} processes owned by other "
+                    "users or the system could not be checked for open files."
+                ),
+                (
                     "      A file one of them is writing could lose data. Run with sudo for "
-                    "the full check."]
-        lines = [f"warning: running as root, but {len(self.blind)} process(es) could not be "
-                 "checked for open files:"]
+                    "the full check."
+                ),
+            ]
+        lines = [
+            (
+                f"warning: running as root, but {len(self.blind)} process(es) could not be "
+                "checked for open files:"
+            )
+        ]
         spots = sorted(self.blind.values())
-        lines += [f"  pid {spot.pid} ({spot.name}): {spot.reason}"
-                  for spot in spots[:BLIND_REPORT_MAX]]
+        lines += [
+            f"  pid {spot.pid} ({spot.name}): {spot.reason}"
+            for spot in spots[:BLIND_REPORT_MAX]
+        ]
         if len(spots) > BLIND_REPORT_MAX:
             lines.append(f"  ...and {len(spots) - BLIND_REPORT_MAX} more")
-        lines.append("  Nothing was lost: any file swapped while that was true was put back as "
-                     f"it was ({skipped} files), so this run may have reclaimed less.")
-        lines.append("  This is unexpected as root. A process that keeps failing here is worth "
-                     "investigating: please report it with the lines above.")
+        lines.append(
+            "  Nothing was lost: any file swapped while that was true was put back as "
+            f"it was ({skipped} files), so this run may have reclaimed less."
+        )
+        lines.append(
+            "  This is unexpected as root. A process that keeps failing here is worth "
+            "investigating: please report it with the lines above."
+        )
         return lines
 
 
@@ -929,6 +1079,7 @@ class _GroupResult(NamedTuple):
     work; already_shared_* are duplicates that were already clones from an
     earlier run and were left untouched -- the latter are the "space earlier runs
     already saved" the summary reports alongside this run's reclaim."""
+
     cloned: int
     reclaimed_logical: int
     reclaimed_allocated: int
@@ -951,8 +1102,9 @@ def _space_detail(logical: int, allocated: int) -> str:
     return f"{_human(allocated)} allocated ({_human(logical)} logical)"
 
 
-def _clone_candidate(dup: FullPath, dst: os.stat_result, cst: os.stat_result,
-                     skips: _Skips) -> bool:
+def _clone_candidate(
+    dup: FullPath, dst: os.stat_result, cst: os.stat_result, skips: _Skips
+) -> bool:
     """True if dup, as dst describes it, could be cloned from the canonical. The
     check dedupe_group runs on an inspection and again on a fresh lstat."""
     if not stat.S_ISREG(dst.st_mode):
@@ -961,7 +1113,11 @@ def _clone_candidate(dup: FullPath, dst: os.stat_result, cst: os.stat_result,
     # cloud by the content re-verify (which read()s it) or the clone. Skip it
     # rather than re-download evicted content (backstop to the scan exclude).
     if _is_dataless(dst.st_flags):
-        skips.add(SkipKind.DATALESS, dup, "dataless (cloud-evicted); skipped to avoid forcing a download")
+        skips.add(
+            SkipKind.DATALESS,
+            dup,
+            "dataless (cloud-evicted); skipped to avoid forcing a download",
+        )
         return False
     # dup and canonical are already the same inode (fclones listed two names
     # for one file, or they are hard links to each other): nothing to
@@ -975,14 +1131,23 @@ def _clone_candidate(dup: FullPath, dst: os.stat_result, cst: os.stat_result,
     # blocks. Skip it (in dry-run too, so the projection matches apply)
     # rather than break a link or miscount st_size as reclaimable.
     if dst.st_nlink > 1:
-        skips.add(SkipKind.HARD_LINKED, dup, f"hard-linked ({dst.st_nlink} links); "
-                  f"cloning would break the link and reclaim nothing")
+        skips.add(
+            SkipKind.HARD_LINKED,
+            dup,
+            f"hard-linked ({dst.st_nlink} links); "
+            f"cloning would break the link and reclaim nothing",
+        )
         return False
     return True
 
 
-def dedupe_group(files: list[FullPath], inspected: Sequence[_Inspected],
-                 swaps: Optional[_Swaps], skips: _Skips, emit: Emit) -> _GroupResult:
+def dedupe_group(
+    files: list[FullPath],
+    inspected: Sequence[_Inspected],
+    swaps: _Swaps | None,
+    skips: _Skips,
+    emit: Emit,
+) -> _GroupResult:
     """Clone files[1:] from files[0], or with swaps None plan to. Returns a
     _GroupResult, whose cloned and reclaimed figures are the plan's: an apply's
     are counted on swaps as each batch settles. inspected holds _inspect of each
@@ -1016,7 +1181,11 @@ def dedupe_group(files: list[FullPath], inspected: Sequence[_Inspected],
     # re-download deliberately-evicted content -- the wrapper already keeps the
     # cloud roots out of the scan, this guards a cached/standalone run.
     if _is_dataless(cst.st_flags):
-        skips.add(SkipKind.DATALESS, canonical, "dataless (cloud-evicted); skipping group to avoid forcing a download")
+        skips.add(
+            SkipKind.DATALESS,
+            canonical,
+            "dataless (cloud-evicted); skipping group to avoid forcing a download",
+        )
         return _GroupResult(0, 0, 0, 0, 0, 0)
 
     # The canonical's full extent map, computed once (None if it is compressed,
@@ -1032,7 +1201,7 @@ def dedupe_group(files: list[FullPath], inspected: Sequence[_Inspected],
     already_shared = 0
     already_shared_logical = 0
     already_shared_allocated = 0
-    for dup, seen in zip(files[1:], inspected[1:]):
+    for dup, seen in zip(files[1:], inspected[1:], strict=True):
         dst = seen.st
         if dst is None:
             e = cast("OSError", seen.error)
@@ -1089,8 +1258,14 @@ def dedupe_group(files: list[FullPath], inspected: Sequence[_Inspected],
             skips.add(_oserror_kind(e), dup, f"cannot open parent dir: {e}")
             continue
         swaps.swap_in(canonical, dirfd, dup, dst, space)
-    return _GroupResult(cloned, reclaimed_logical, reclaimed_allocated,
-                        already_shared, already_shared_logical, already_shared_allocated)
+    return _GroupResult(
+        cloned,
+        reclaimed_logical,
+        reclaimed_allocated,
+        already_shared,
+        already_shared_logical,
+        already_shared_allocated,
+    )
 
 
 def _supports_symlink_safe_clone(mac_ver: str) -> bool:
@@ -1128,16 +1303,27 @@ class _FclonesStats(TypedDict, total=False):
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="Apply APFS-clone deduplication from an fclones JSON report read on stdin.")
-    p.add_argument("--apply", action="store_true",
-                   help="actually clone duplicates (default: dry-run, changes nothing)")
-    p.add_argument("--work-dir", type=FullPath, default=None,
-                   help="private directory for clones and displaced files, on the same "
-                        "volume as the files being deduped (required with --apply)")
-    p.add_argument("--verbose", action="store_true",
-                   help="print a line per cloned file (in --apply) and per skipped file "
-                        "(default: an --apply run prints just the summary; a dry-run always "
-                        "prints its full plan)")
+        description="Apply APFS-clone deduplication from an fclones JSON report read on stdin."
+    )
+    p.add_argument(
+        "--apply",
+        action="store_true",
+        help="actually clone duplicates (default: dry-run, changes nothing)",
+    )
+    p.add_argument(
+        "--work-dir",
+        type=FullPath,
+        default=None,
+        help="private directory for clones and displaced files, on the same "
+        "volume as the files being deduped (required with --apply)",
+    )
+    p.add_argument(
+        "--verbose",
+        action="store_true",
+        help="print a line per cloned file (in --apply) and per skipped file "
+        "(default: an --apply run prints just the summary; a dry-run always "
+        "prints its full plan)",
+    )
     # Scan stats supplied by the wrapper, which is what runs fclones: it times the
     # scan and reads the files-considered count from fclones' log. Optional and
     # hidden -- they are a wrapper->engine seam, not for direct use; run on
@@ -1150,8 +1336,11 @@ def main() -> int:
     # wrapper, which can be bypassed -- refuses to run where CLONE_NOFOLLOW_ANY
     # would be silently ignored and reopen the symlink race.
     if args.apply and not _supports_symlink_safe_clone(platform.mac_ver()[0]):
-        print("error: --apply requires macOS 15+ for symlink-safe cloning "
-              "(CLONE_NOFOLLOW_ANY, absent before macOS 15).", file=sys.stderr)
+        print(
+            "error: --apply requires macOS 15+ for symlink-safe cloning "
+            "(CLONE_NOFOLLOW_ANY, absent before macOS 15).",
+            file=sys.stderr,
+        )
         return 1
 
     swaps_work_fd = -1
@@ -1162,17 +1351,26 @@ def main() -> int:
         try:
             swaps_work_fd = _open_work_dir(args.work_dir)
             if not _writer_scan_works(swaps_work_fd):
-                print("error: cannot detect open files on this macOS version, so a swap "
-                      "could lose a writer's data; refusing to apply.", file=sys.stderr)
+                print(
+                    "error: cannot detect open files on this macOS version, so a swap "
+                    "could lose a writer's data; refusing to apply.",
+                    file=sys.stderr,
+                )
                 return 1
             leftovers = os.listdir(swaps_work_fd)
         except OSError as e:
-            print(f"error: cannot use work directory {args.work_dir}: {e}", file=sys.stderr)
+            print(
+                f"error: cannot use work directory {args.work_dir}: {e}",
+                file=sys.stderr,
+            )
             return 1
         if leftovers:
-            print(f"note: {len(leftovers)} file(s) in {args.work_dir} were left by an interrupted "
-                  "run or a warning. They are not deleted automatically: check them, then "
-                  "remove them.", file=sys.stderr)
+            print(
+                f"note: {len(leftovers)} file(s) in {args.work_dir} were left by an interrupted "
+                "run or a warning. They are not deleted automatically: check them, then "
+                "remove them.",
+                file=sys.stderr,
+            )
 
     try:
         report = json.load(sys.stdin)
@@ -1198,8 +1396,11 @@ def main() -> int:
     # goes to stderr only under --verbose, since on a broad run they are the bulk
     # of the output and mostly not actionable file-by-file.
     skips = _Skips(log, args.verbose)
-    swaps = (_Swaps(swaps_work_fd, args.work_dir, args.verbose, skips, log, emit)
-             if args.apply else None)
+    swaps = (
+        _Swaps(swaps_work_fd, args.work_dir, args.verbose, skips, log, emit)
+        if args.apply
+        else None
+    )
 
     total_cloned = 0
     total_reclaimed_logical = 0
@@ -1213,8 +1414,10 @@ def main() -> int:
     if file_count:
         # fclones logs as it goes and this stage is otherwise silent, so without
         # this line a run looks stalled from the moment fclones exits.
-        log(f"checking {file_count} files in {len(file_groups)} groups "
-            f"on {workers} thread{'s' if workers != 1 else ''}...")
+        log(
+            f"checking {file_count} files in {len(file_groups)} groups "
+            f"on {workers} thread{'s' if workers != 1 else ''}..."
+        )
     progress = _Progress(file_count, swaps, skips, log)
     for files, inspected in _inspect_groups(file_groups, workers):
         gr = dedupe_group(files, inspected, swaps, skips, emit)
@@ -1236,23 +1439,31 @@ def main() -> int:
     # the duration can stand alone if the files count could not be read.
     if args.scan_seconds is not None:
         if args.files_scanned is not None:
-            print(f"scanned: {args.files_scanned} files in {_human_duration(args.scan_seconds)}")
+            print(
+                f"scanned: {args.files_scanned} files in {_human_duration(args.scan_seconds)}"
+            )
         else:
             print(f"scan completed in {_human_duration(args.scan_seconds)}")
 
     found = stats.get("redundant_file_size")
     if found is not None:
-        print(f"duplicates found by fclones: {_human(found)} logical "
-              f"in {stats.get('redundant_file_count', '?')} files")
+        print(
+            f"duplicates found by fclones: {_human(found)} logical "
+            f"in {stats.get('redundant_file_count', '?')} files"
+        )
     # Space earlier runs already saved: duplicates we found still sharing
     # storage from a prior clone, left untouched this run (see dedupe_group).
     if total_already_shared:
-        print("already saved by earlier clones: "
-              f"{_space_detail(total_already_shared_logical, total_already_shared_allocated)} "
-              f"across {total_already_shared} files")
+        print(
+            "already saved by earlier clones: "
+            f"{_space_detail(total_already_shared_logical, total_already_shared_allocated)} "
+            f"across {total_already_shared} files"
+        )
     verb = "reclaimed" if args.apply else "would reclaim"
-    print(f"{verb}: {_space_detail(total_reclaimed_logical, total_reclaimed_allocated)} "
-          f"across {total_cloned} files")
+    print(
+        f"{verb}: {_space_detail(total_reclaimed_logical, total_reclaimed_allocated)} "
+        f"across {total_cloned} files"
+    )
 
     # Skips, broken down by reason rather than streamed per-file (see _Skips).
     # Advise only on the permission case -- the one a user can fix, by granting
@@ -1266,13 +1477,17 @@ def main() -> int:
             if n:
                 print(f"  {n:>{width}}  {_SKIP_LABEL[kind]}")
         if skips.counts.get(SkipKind.PERMISSION):
-            print("  to include privacy-protected folders (Desktop, Documents, "
-                  "Downloads, ...), run apfs-dedupe yourself from a terminal with "
-                  "Full Disk Access; a scheduled run cannot reach them")
+            print(
+                "  to include privacy-protected folders (Desktop, Documents, "
+                "Downloads, ...), run apfs-dedupe yourself from a terminal with "
+                "Full Disk Access; a scheduled run cannot reach them"
+            )
         if not args.verbose:
             print("  re-run with --verbose to list every skipped file")
     if swaps is not None:
-        for line in swaps.blind_report(os.geteuid() == 0, skips.counts.get(SkipKind.UNVERIFIED, 0)):
+        for line in swaps.blind_report(
+            os.geteuid() == 0, skips.counts.get(SkipKind.UNVERIFIED, 0)
+        ):
             print(line)
     return 0
 
