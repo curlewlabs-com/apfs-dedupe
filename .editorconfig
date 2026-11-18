@@ -1,0 +1,8 @@
+# The style the shell scripts are written in, which shfmt reads.
+root = true
+
+[*.sh]
+indent_style = space
+indent_size = 4
+switch_case_indent = true
+binary_next_line = true
