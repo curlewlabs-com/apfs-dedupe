@@ -19,7 +19,7 @@ opt into changes with `--apply`.**
 ## Quick start
 
 ```sh
-brew install fclones                      # the one dependency
+brew install fclones python               # Python 3.12 or newer, as python3 on PATH
 git clone https://github.com/curlewlabs-com/apfs-dedupe.git
 cd apfs-dedupe
 ./apfs-dedupe.sh --scope ~/Projects       # dry-run: shows what it would reclaim
