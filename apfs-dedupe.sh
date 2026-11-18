@@ -481,7 +481,7 @@ prc=0
 USE_SHARED=""
 scan_start=$(date +%s)
 if [ -n "$PREFILTER" ]; then
-    python3 "$PREFILTER_ENGINE" --scope "$SCOPE" --min "$MIN" --shared-out "$SHARED" "$@" \
+    "$PYTHON" "$PREFILTER_ENGINE" --scope "$SCOPE" --min "$MIN" --shared-out "$SHARED" "$@" \
         >"$ROOTS" 2>"$PFERR" || prc=$?
     if [ "$prc" -eq 0 ] && [ -s "$ROOTS" ]; then
         USE_SHARED=1
