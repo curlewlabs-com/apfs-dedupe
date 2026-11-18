@@ -177,9 +177,28 @@ SCOPE=$(
         exit 1
     }
 
+# The interpreter the scheduled job runs the engine with, recorded by absolute
+# path in APFS_DEDUPE_PYTHON: launchd starts the job with a PATH of its own, on
+# which python3 can be another, older interpreter than the one found here.
+# --uninstall writes no job, so it needs none.
+if [ "$ACTION" != "uninstall" ]; then
+    PYTHON=$(command -v python3) || {
+        echo "error: python3 not found -- apfs-dedupe needs Python 3.12 or newer (for example: brew install python)." >&2
+        exit 1
+    }
+    "$PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 12))' 2>/dev/null || {
+        echo "error: $PYTHON is older than Python 3.12, which apfs-dedupe needs." >&2
+        echo "       Put a newer python3 first on PATH (for example: brew install python)." >&2
+        if [ "$MODE" = "system" ]; then
+            echo "       If sudo replaced your PATH, pass it through: sudo env PATH=\"\$PATH\" $0 --system ..." >&2
+        fi
+        exit 1
+    }
+fi
+
 # PATH for the scheduled job. A LaunchAgent/LaunchDaemon inherits a minimal PATH
-# that excludes Homebrew, where fclones is installed (python3 is in /usr/bin), so
-# the job would fail "fclones not found" without this. Prepend the dirs of the
+# that excludes Homebrew, where fclones is installed, so the job would fail
+# "fclones not found" without this. Prepend the dirs of the
 # fclones/python3 we can resolve now to the usual Homebrew (Apple-silicon and
 # Intel) and system locations, so the job finds the same tools the installing
 # shell has.
@@ -217,7 +236,9 @@ $WORK_FLAGS_XML$EXCLUDE_XML
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>$(xml_escape "$(job_path)")</string>$LOG_ENV_XML
+        <string>$(xml_escape "$(job_path)")</string>
+        <key>APFS_DEDUPE_PYTHON</key>
+        <string>$(xml_escape "$PYTHON")</string>$LOG_ENV_XML
     </dict>
     <key>StartCalendarInterval</key>
     <dict>

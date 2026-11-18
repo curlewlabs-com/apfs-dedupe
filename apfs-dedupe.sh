@@ -306,8 +306,18 @@ command -v fclones >/dev/null 2>&1 || {
     echo "error: fclones not found -- install with: brew install fclones" >&2
     exit 1
 }
-command -v python3 >/dev/null 2>&1 || {
-    echo "error: python3 not found (install the Xcode Command Line Tools)." >&2
+# The engine needs Python 3.12 or newer. A scheduled job names the interpreter
+# install-daily.sh found in APFS_DEDUPE_PYTHON, since launchd starts it with a
+# PATH of its own; a run from a shell takes python3 from PATH.
+PYTHON=${APFS_DEDUPE_PYTHON:-python3}
+command -v "$PYTHON" >/dev/null 2>&1 || {
+    echo "error: $PYTHON not found -- apfs-dedupe needs Python 3.12 or newer (for example: brew install python)." >&2
+    exit 1
+}
+"$PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 12))' 2>/dev/null || {
+    echo "error: $(command -v "$PYTHON") is older than Python 3.12, which apfs-dedupe needs." >&2
+    echo "       Put a newer python3 first on PATH (for example: brew install python); for a" >&2
+    echo "       scheduled run, then re-run install-daily.sh so the job records it." >&2
     exit 1
 }
 
@@ -488,7 +498,7 @@ set --
 [ -n "$VERBOSE" ] && set -- "$@" --verbose
 set -- "$@" --scan-seconds "$scan_secs"
 [ -n "$files_scanned" ] && set -- "$@" --files-scanned "$files_scanned"
-python3 "$APPLY_ENGINE" "$@" <"$REPORT"
+"$PYTHON" "$APPLY_ENGINE" "$@" <"$REPORT"
 
 # After an --apply, APFS/Time Machine *local* snapshots (taken hourly) are
 # copy-on-write and pin the blocks they captured, so blocks just freed can stay

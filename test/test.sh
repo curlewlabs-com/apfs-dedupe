@@ -500,6 +500,49 @@ for glob in 'App Support/**' '*.log' 'R&D/**'; do
     fi
 done
 
+# ---- the scheduled job runs the engine with the installer's python3, named by
+# absolute path, and a python3 older than 3.12 is refused before any scan ----
+# launchd starts the job with a PATH of its own, on which python3 can be an older
+# interpreter than the one the installer found, such as macOS's own, which cannot
+# run the engine. Both scripts must refuse one with a message saying what is
+# needed, rather than letting it fail inside the engine after a whole scan. The
+# stub stands in for an older python3: the version probe is all either script
+# asks of the interpreter before refusing.
+d="$WORK/interpreter"
+mkdir -p "$d/old" "$d/bin" "$d/scope"
+printf '#!/bin/sh\nexit 1\n' >"$d/old/python3"
+cat >"$d/bin/fclones" <<EOF
+#!/bin/sh
+touch "$d/fclones-ran"
+printf '{"header":{"stats":{}},"groups":[]}\n'
+EOF
+chmod +x "$d/old/python3" "$d/bin/fclones"
+"$HERE/../install-daily.sh" --print --scope "$d/scope" >"$d/job.plist"
+recorded=$(plutil -extract EnvironmentVariables.APFS_DEDUPE_PYTHON raw -o - "$d/job.plist" 2>/dev/null || true)
+case "$recorded" in
+    /*) assert_eq "interpreter: the job records the installer's python3" "$recorded" "$(command -v python3)" ;;
+    *) fail "interpreter: the job does not name its python3 by absolute path (got '$recorded')" ;;
+esac
+rc=0
+err=$(PATH="$d/old:$PATH" "$HERE/../install-daily.sh" --print --scope "$d/scope" 2>&1 >/dev/null) || rc=$?
+case "$rc:$err" in
+    0:*) fail "interpreter: the installer accepted a python3 older than 3.12" ;;
+    *"older than Python 3.12"*) pass "interpreter: the installer refuses a python3 older than 3.12" ;;
+    *) fail "interpreter: the installer refused without saying why (got: $err)" ;;
+esac
+rc=0
+err=$(APFS_DEDUPE_PYTHON="$d/old/python3" PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" 2>&1 >/dev/null) || rc=$?
+case "$rc:$err" in
+    0:*) fail "interpreter: the wrapper ran with a python3 older than 3.12" ;;
+    *"older than Python 3.12"*) pass "interpreter: the wrapper refuses a python3 older than 3.12" ;;
+    *) fail "interpreter: the wrapper refused without saying why (got: $err)" ;;
+esac
+if [ -e "$d/fclones-ran" ]; then
+    fail "interpreter: the wrapper scanned before refusing the interpreter"
+else
+    pass "interpreter: the wrapper refuses before it scans"
+fi
+
 # ---- the dry-run plan and the --apply audit trail go to STDOUT (so '> file'
 # keeps them), and per-file --apply lines are opt-in. The dry-run plan is its
 # primary output and is always on stdout. An --apply run prints only the summary
