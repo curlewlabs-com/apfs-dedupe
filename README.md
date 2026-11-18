@@ -186,8 +186,10 @@ cannot be affected. For most trees that should not be necessary.
 
 ## Requirements
 
-Requires macOS (APFS), `fclones`, and `python3` (Xcode Command Line Tools -
-already present on most dev machines). `--apply` additionally requires **macOS
+Requires macOS on Apple silicon (APFS), `fclones`, and **Python 3.12 or newer**
+as `python3` on `PATH` (for example `brew install python`). The `/usr/bin/python3`
+macOS ships is older, and both `apfs-dedupe.sh` and `install-daily.sh` refuse it
+with a message. `--apply` additionally requires **macOS
 15+**: it uses `CLONE_NOFOLLOW_ANY` for symlink-safe path resolution, which
 Apple's headers first define in macOS 15, and refuses to run on older systems.
 Dry-run uses none of that and works on any macOS version.
@@ -346,8 +348,10 @@ that log size-capped and gzipped - macOS's own rotator, with archives kept
 whole-machine recurring runs; pass `--min 1` if you want the daemon to scan every
 non-empty file daily.
 
-Known limitation: `--system` stores this checkout's script path and the installer
-shell's `fclones`/`python3` search path in a root daemon. That is appropriate for a
+Known limitation: `--system` stores this checkout's script path, the installer
+shell's `fclones` search path and the absolute path of its `python3` in a root
+daemon. The job runs the engine with that `python3`, since launchd's `PATH` can
+lead to an older one; re-run the installer after moving to another Python. That is appropriate for a
 self-managed personal machine or trusted CI host; a future hardening pass can
 require root-owned, non-group/world-writable tool paths before aiming this at
 adversarial multi-user machines.
@@ -372,17 +376,21 @@ Exclude such a tool's working trees, for example a CI runner's checkouts.
 
 ```sh
 sh test/test.sh                              # integration tests (macOS 15+, real clonefile, fclones)
-npx pyright@<version>                        # strict type check of lib/apply.py
-shellcheck apfs-dedupe.sh install-daily.sh test/test.sh
+pip install -r requirements-dev.txt && mypy  # strict type check of lib/apply.py
+npx pyright@<version>                        # the same, with pyright
 ```
 
-CI pins the pyright and shellcheck releases in `.github/workflows/ci.yml`; use
-the same ones, since another release can report differently.
+`requirements-dev.txt` pins mypy and `.github/workflows/ci.yml` pins pyright;
+use the same ones, since another release can report differently. CI also runs
+the checks every Curlew Labs repository shares
+([ci-baseline](https://github.com/curlewlabs-com/ci-baseline)): among them
+shellcheck, shfmt, ruff and prettier, under this repository's `pyproject.toml`
+and `.editorconfig`.
 
 `lib/apply.py` brands path strings as `FullPath` vs `Basename` (distinct
 `NewType`s), so a directory-relative component can't be passed - or logged - where
-a resolvable path belongs; `pyright` (strict) enforces it. All three checks run
-in CI on every PR.
+a resolvable path belongs; mypy and pyright (both strict) enforce it. All of
+these run in CI on every PR.
 
 ## License
 

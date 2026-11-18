@@ -100,8 +100,8 @@ of defense.
 
 The fd-relative calls take a bare directory-relative component, while the clone
 source and every diagnostic take a path that resolves on its own. The engine
-brands these as distinct types (`Basename` vs `FullPath`) so `pyright --strict`
-(run in CI) rejects passing - or logging - one where the other belongs, keeping
+brands these as distinct types (`Basename` vs `FullPath`) so strict mypy and pyright
+(run in CI) reject passing - or logging - one where the other belongs, keeping
 that safety-relevant distinction from silently drifting.
 
 `CLONE_NOFOLLOW_ANY` is also the binding OS-version floor. Apple's
