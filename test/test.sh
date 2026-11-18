@@ -25,7 +25,11 @@ cleanup() {
     chflags -R nouchg "$WORK" 2>/dev/null || true
     rm -rf "$WORK"
 }
-trap cleanup EXIT INT TERM
+# After a set -u abort, macOS /bin/sh enters an EXIT trap with a stale $?, so
+# a run that stopped short would exit 0; RUN_COMPLETE tells the trap it did not.
+RUN_COMPLETE=0
+# shellcheck disable=SC2154  # the trap body assigns _trap_rc before it reads it
+trap '_trap_rc=$?; [ "$RUN_COMPLETE" = 1 ] || [ "$_trap_rc" -ne 0 ] || _trap_rc=1; cleanup; exit "$_trap_rc"' EXIT INT TERM
 
 FAILED=0
 pass() { printf 'PASS: %s\n' "$1"; }
@@ -1103,4 +1107,6 @@ esac
 
 echo
 if [ "$FAILED" -eq 0 ]; then echo "all tests passed"; else echo "some tests FAILED"; fi
-exit "$FAILED"
+[ "$FAILED" -eq 0 ] || exit "$FAILED"
+RUN_COMPLETE=1
+exit 0

@@ -330,7 +330,11 @@ WORK_DIR="$SCOPE/.apfsdedupe-work"
 
 REPORT=$(mktemp)
 FCERR=$(mktemp)
-trap 'rm -f "$REPORT" "$FCERR"' EXIT INT TERM
+# After a set -u abort, macOS /bin/sh enters an EXIT trap with a stale $?, so
+# a run that stopped short would exit 0; RUN_COMPLETE tells the trap it did not.
+RUN_COMPLETE=0
+# shellcheck disable=SC2154  # the trap body assigns _trap_rc before it reads it
+trap '_trap_rc=$?; [ "$RUN_COMPLETE" = 1 ] || [ "$_trap_rc" -ne 0 ] || _trap_rc=1; rm -f "$REPORT" "$FCERR"; exit "$_trap_rc"' EXIT INT TERM
 
 # Cloud-backed files (iCloud Drive, third-party File Providers, Photos library
 # originals) can be "dataless" -- evicted to the cloud, holding no local bytes.
@@ -502,3 +506,4 @@ if [ -n "$APPLY" ] && tmutil listlocalsnapshots / 2>/dev/null | grep -q 'com\.ap
     echo "        sudo tmutil thinlocalsnapshots /System/Volumes/Data 21474836480 4" >&2
     echo "      See the README section \"Why didn't free space change? Snapshots\"." >&2
 fi
+RUN_COMPLETE=1
