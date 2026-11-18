@@ -70,3 +70,10 @@ release assets immutable. After merging the release commit to `main`, create
 and push the version tag, then publish that same tag with `gh release create`.
 Do not create a moving version alias unless the release contract is explicitly
 expanded to support one.
+
+## License
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this project by you, as defined in the Apache-2.0 license,
+shall be dual licensed under the MIT and Apache-2.0 licenses, as the README's
+License section describes, without any additional terms or conditions.
