@@ -21,6 +21,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # Pin shellcheck to an exact release rather than ubuntu's preinstalled,
       # floating version: older shellcheck misfires SC2317 on the trap-invoked
       # cleanup() that 0.11.0 and later read correctly.
@@ -46,6 +48,8 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # The runner image ships rustup but not a fixed Rust, so the toolchain
       # that builds fclones is installed at an exact release.
       - name: install Rust
@@ -65,3 +69,14 @@ jobs:
           test "$(fclones --version)" = "fclones 0.35.0"
       - name: integration test (real APFS clonefile)
         run: sh test/test.sh
+
+  baseline:
+    # The checks every Curlew Labs repository runs, in one place:
+    # https://github.com/curlewlabs-com/ci-baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: curlewlabs-com/ci-baseline@c82082df9a3c5e6dab047d9ddb92f130f1537d8e # v0.1.1
