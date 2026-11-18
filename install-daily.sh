@@ -56,8 +56,13 @@
 # paths if this is aimed at adversarial multi-user hosts.
 set -eu
 
-HERE=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
+HERE=$(
+    unset CDPATH
+    cd -- "$(dirname -- "$0")" && pwd
+)
 TOOL="$HERE/apfs-dedupe.sh"
+# shellcheck source=lib/python.sh
+. "$HERE/lib/python.sh"
 
 # Escape the three characters that would break the plist XML. Paths with spaces
 # are fine inside an XML <string>; &, <, > are not, so a home or repo path
@@ -81,18 +86,50 @@ MIN=""
 ACTION="install"
 while [ $# -gt 0 ]; do
     case "$1" in
-        --system) MODE="system"; shift ;;
-        --scope) SCOPE="${2:?--scope needs a PATH}"; shift 2 ;;
-        --scope=*) SCOPE="${1#--scope=}"; shift ;;
-        --min) MIN="${2:?--min needs a SIZE}"; shift 2 ;;
-        --min=*) MIN="${1#--min=}"; shift ;;
-        --exclude) add_exclude "${2:?--exclude needs a GLOB}"; shift 2 ;;
-        --exclude=*) add_exclude "${1#--exclude=}"; shift ;;
-        --print) ACTION="print"; shift ;;
-        --uninstall) ACTION="uninstall"; shift ;;
-        -h|--help)
-            sed -n '2,/^set -eu/p' "$0" | sed -e '/^set -eu/d' -e 's/^# \{0,1\}//'; exit 0 ;;
-        *) echo "unknown option: $1" >&2; exit 2 ;;
+        --system)
+            MODE="system"
+            shift
+            ;;
+        --scope)
+            SCOPE="${2:?--scope needs a PATH}"
+            shift 2
+            ;;
+        --scope=*)
+            SCOPE="${1#--scope=}"
+            shift
+            ;;
+        --min)
+            MIN="${2:?--min needs a SIZE}"
+            shift 2
+            ;;
+        --min=*)
+            MIN="${1#--min=}"
+            shift
+            ;;
+        --exclude)
+            add_exclude "${2:?--exclude needs a GLOB}"
+            shift 2
+            ;;
+        --exclude=*)
+            add_exclude "${1#--exclude=}"
+            shift
+            ;;
+        --print)
+            ACTION="print"
+            shift
+            ;;
+        --uninstall)
+            ACTION="uninstall"
+            shift
+            ;;
+        -h | --help)
+            sed -n '2,/^set -eu/p' "$0" | sed -e '/^set -eu/d' -e 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)
+            echo "unknown option: $1" >&2
+            exit 2
+            ;;
     esac
 done
 
@@ -133,17 +170,46 @@ fi
 # runs the job from its own working directory, so a relative scope stored in
 # the plist would later resolve against the wrong directory.
 RAW_SCOPE="$SCOPE"
-SCOPE=$(unset CDPATH; cd -- "$RAW_SCOPE" 2>/dev/null && pwd -P) \
-    || { echo "error: scope not found: $RAW_SCOPE" >&2; exit 1; }
+SCOPE=$(
+    unset CDPATH
+    cd -- "$RAW_SCOPE" 2>/dev/null && pwd -P
+) \
+    || {
+        echo "error: scope not found: $RAW_SCOPE" >&2
+        exit 1
+    }
+
+# The interpreter the scheduled job runs the engine with, recorded by absolute
+# path in APFS_DEDUPE_PYTHON: launchd starts the job with a PATH of its own, on
+# which python3 can be another, older interpreter than the one found here.
+# --uninstall writes no job, so it needs none.
+if [ "$ACTION" != "uninstall" ]; then
+    find_python || exit 1
+    # The interpreter itself, as it names itself: what PATH found can be a
+    # relative path, or a launcher such as a pyenv shim that picks its Python
+    # from an environment and working directory launchd does not reproduce.
+    PYTHON=$("$PYTHON" -c 'import sys; print(sys.executable)')
+    case "$PYTHON" in
+        /*) ;;
+        *)
+            echo "error: python3 does not report an absolute path for itself (got '$PYTHON')." >&2
+            exit 1
+            ;;
+    esac
+fi
 
 # PATH for the scheduled job. A LaunchAgent/LaunchDaemon inherits a minimal PATH
-# that excludes Homebrew, where fclones is installed (python3 is in /usr/bin), so
-# the job would fail "fclones not found" without this. Prepend the dirs of the
+# that excludes Homebrew, where fclones is installed, so the job would fail
+# "fclones not found" without this. Prepend the dirs of the
 # fclones/python3 we can resolve now to the usual Homebrew (Apple-silicon and
-# Intel) and system locations, so the job finds the same tools the installing
-# shell has.
+# Intel; APFS_DEDUPE_BREW_BINS) and system locations, so the job finds the same
+# tools the installing shell has.
 job_path() {
-    p="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    p=""
+    for dir in $APFS_DEDUPE_BREW_BINS; do
+        p="$p$dir:"
+    done
+    p="${p}/usr/bin:/bin:/usr/sbin:/sbin"
     for tool in fclones python3; do
         dir=$(command -v "$tool" 2>/dev/null) || continue
         dir=$(dirname -- "$dir")
@@ -176,7 +242,9 @@ $WORK_FLAGS_XML$EXCLUDE_XML
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>$(xml_escape "$(job_path)")</string>$LOG_ENV_XML
+        <string>$(xml_escape "$(job_path)")</string>
+        <key>APFS_DEDUPE_PYTHON</key>
+        <string>$(xml_escape "$PYTHON")</string>$LOG_ENV_XML
     </dict>
     <key>StartCalendarInterval</key>
     <dict>
@@ -267,9 +335,12 @@ if [ "$MODE" != "system" ] && [ "$(id -u)" -eq 0 ]; then
     echo "       privileges; for an all-users root sweep use: sudo $0 --system." >&2
     exit 1
 fi
-[ -x "$TOOL" ] || { echo "error: $TOOL not found or not executable." >&2; exit 1; }
+[ -x "$TOOL" ] || {
+    echo "error: $TOOL not found or not executable." >&2
+    exit 1
+}
 mkdir -p "$(dirname -- "$PLIST")" "$(dirname -- "$LOG")"
-gen_plist > "$PLIST"
+gen_plist >"$PLIST"
 # launchd refuses to load a LaunchDaemon plist that is group/world-writable or
 # not owned by root:wheel (a privilege-safety check). We create it as root in
 # system mode, so set ownership/mode explicitly rather than trust the umask.
@@ -286,12 +357,15 @@ if [ "$MODE" = "system" ]; then
     # robust. The conf is world-readable 644 like its siblings there -- it is
     # rotation policy, not a secret; only the log it names is 600.
     mkdir -p "$(dirname -- "$NEWSYSLOG_CONF")"
-    gen_newsyslog_conf > "$NEWSYSLOG_CONF"
+    gen_newsyslog_conf >"$NEWSYSLOG_CONF"
     chown root:wheel "$NEWSYSLOG_CONF"
     chmod 644 "$NEWSYSLOG_CONF"
 fi
 # Reject a malformed plist before asking launchd to load it.
-plutil -lint "$PLIST" >/dev/null || { echo "error: generated plist is invalid: $PLIST" >&2; exit 1; }
+plutil -lint "$PLIST" >/dev/null || {
+    echo "error: generated plist is invalid: $PLIST" >&2
+    exit 1
+}
 
 # Replace any previous instance, then load. A gui/ bootstrap can fail when run
 # outside a GUI login session; in that mode the plist is still in place and will

@@ -14,21 +14,27 @@ discussion up front saves rework.
 
 ## Running the checks
 
-These are the same three checks CI runs on every push and PR (see the README
-"Development" section):
+These are the checks CI runs on every push and PR that are this repository's
+own (see the README "Development" section):
 
 ```sh
 sh test/test.sh                              # integration tests - macOS 15+, real clonefile + fclones
-npx pyright@<version>                        # strict type check of lib/apply.py (the release ci.yml pins)
-shellcheck apfs-dedupe.sh install-daily.sh test/test.sh
+pip install -r requirements-dev.txt && mypy  # strict type check of lib/apply.py
+npx pyright@<version>                        # the same, with pyright (the release ci.yml pins)
 ```
+
+CI also runs the checks every Curlew Labs repository shares
+([ci-baseline](https://github.com/curlewlabs-com/ci-baseline)), among them
+shellcheck, shfmt, ruff and prettier, under this repository's `pyproject.toml`
+and `.editorconfig`.
 
 `test/test.sh` also runs `test/test_concurrent_writers.py`, which races the apply
 against real writers, `test/test_inspect.py`, which covers the threaded
 inspection, and `test/test_prefilter.py`, which covers the clone-id prefilter.
 The integration test needs **macOS 15+** (it exercises real `clonefile` /
-`CLONE_NOFOLLOW_ANY`) and `fclones` on `PATH` (`brew install fclones`). The type
-check and shellcheck run anywhere.
+`CLONE_NOFOLLOW_ANY`), `fclones` on `PATH` (`brew install fclones`), and Python
+3.12 or newer as `python3` (`brew install python`). The type checks run
+anywhere.
 
 ## Conventions
 
@@ -38,14 +44,16 @@ check and shellcheck run anywhere.
   test.
 - **Pin dependencies exactly.** A GitHub Action is pinned to its release's
   commit SHA with the version beside it, since a tag can be moved, and tools
-  are pinned to exact versions (the `pyright` / `shellcheck` pins in CI), so a
+  are pinned to exact versions (`requirements-dev.txt` and the `pyright` pin in
+  CI), so a
   resolver cannot silently move them. Match that when adding any. That
   includes the Rust release CI builds `fclones` with, and `fclones` itself
   (`cargo install fclones --version <version> --locked`). Renovate proposes
   updates to these pins; the `# renovate:` comment above an inline pin tells
   it what the literal is, so a new inline pin needs one.
 - **Comments explain _why_, not _what_.** `lib/apply.py` brands path strings as
-  `FullPath` vs `Basename` (`NewType`s that pyright enforces in strict mode) so a
+  `FullPath` vs `Basename` (`NewType`s that mypy and pyright enforce in strict
+  mode) so a
   directory-relative component cannot be passed where a resolvable path belongs;
   keep new path handling within that scheme.
 - **Safe by default stays the default.** Dry-run is the default; anything that
@@ -71,3 +79,9 @@ release assets immutable. After merging the release commit to `main`, create
 and push the version tag, then publish that same tag with `gh release create`.
 Do not create a moving version alias unless the release contract is explicitly
 expanded to support one.
+
+## License
+
+By submitting a contribution for inclusion in this project, you agree that it
+is licensed under the MIT and Apache-2.0 licenses, as the README's License
+section describes, without any additional terms or conditions.

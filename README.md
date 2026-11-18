@@ -19,7 +19,7 @@ opt into changes with `--apply`.**
 ## Quick start
 
 ```sh
-brew install fclones                      # the one dependency
+brew install fclones python               # Python 3.12 or newer, as python3 on PATH
 git clone https://github.com/curlewlabs-com/apfs-dedupe.git
 cd apfs-dedupe
 ./apfs-dedupe.sh --scope ~/Projects       # dry-run: shows what it would reclaim
@@ -52,10 +52,10 @@ scope: `sudo ./apfs-dedupe.sh` (still a dry-run), then `sudo ./apfs-dedupe.sh --
 [`fclones`](https://github.com/pkolaczk/fclones) can do the dedupe apply too
 (`fclones dedupe`); on macOS that path has two gaps:
 
-- **A vanishing-file window.** `fclones dedupe` renames the original aside, *then*
+- **A vanishing-file window.** `fclones dedupe` renames the original aside, _then_
   clones over it - so the path briefly has no file, and stays that way if the
   process dies between the two steps.
-- **Dropped ACLs.** `clonefile` copies the *source's* metadata; dedupers restore
+- **Dropped ACLs.** `clonefile` copies the _source's_ metadata; dedupers restore
   POSIX bits / owner / times / xattrs but lose the file's ACLs.
 
 `apfs-dedupe` does the apply itself, correctly - every step relative to a file
@@ -81,7 +81,7 @@ never appears beside your files, where `git status` or a file watcher would see 
 ## Deduping all of /Users, across every user
 
 Running as root over the whole machine is the intended use, and it is safe. The
-apply restores each *replaced* file's own owner, group, mode, and ACL - the
+apply restores each _replaced_ file's own owner, group, mode, and ACL - the
 canonical file is never modified - so every file keeps its identity and the only
 thing that ever crosses a user boundary is the shared bytes, which were identical
 to begin with. Because the clone is copy-on-write, a later write by any user
@@ -99,7 +99,7 @@ files can't be modified in any case (they would simply error and be skipped).
 - **Dry-run by default.** Nothing changes until you pass `--apply`.
 - **Content re-verify against a frozen clone, right before the swap.** `clonefile`
   is not content-verified by the kernel (unlike Linux `FIDEDUPERANGE`), so we clone
-  first - a copy-on-write snapshot - then re-compare *that* against the duplicate
+  first - a copy-on-write snapshot - then re-compare _that_ against the duplicate
   immediately before replacing. It closes the window since the scan (seconds to
   minutes earlier on a large run), a concurrent write to the original can't affect
   the result, and this check is always on.
@@ -192,8 +192,12 @@ cannot be affected. For most trees that should not be necessary.
 
 ## Requirements
 
-Requires macOS (APFS), `fclones`, and `python3` (Xcode Command Line Tools -
-already present on most dev machines). `--apply` additionally requires **macOS
+Requires macOS on Apple silicon (APFS), `fclones`, and **Python 3.12 or newer**
+(for example `brew install python`). Both `apfs-dedupe.sh` and
+`install-daily.sh` take `python3` from `PATH` when it is new enough, and
+otherwise look for one in Homebrew's prefixes (`/opt/homebrew/bin`, then
+`/usr/local/bin`). The `/usr/bin/python3` macOS ships is older; if nothing newer
+is found, both refuse with a message naming where they looked. `--apply` additionally requires **macOS
 15+**: it uses `CLONE_NOFOLLOW_ANY` for symlink-safe path resolution, which
 Apple's headers first define in macOS 15, and refuses to run on older systems.
 Dry-run uses none of that and works on any macOS version.
@@ -209,7 +213,7 @@ apfs-dedupe.sh [--apply] [--scope PATH] [--min SIZE] [--exclude GLOB] [--verbose
   every user; deduping across users is safe - see above).
 - `--min SIZE` - ignore files smaller than this (default `1M`). A bare number is
   **bytes** (`--min 100000` ~ 98 KiB); add a suffix for units - `500K`, `1M`,
-  `2G` (decimal) or `KiB`/`MiB`/`GiB` (binary). The default bounds *work*, not
+  `2G` (decimal) or `KiB`/`MiB`/`GiB` (binary). The default bounds _work_, not
   savings: cloning any ordinary allocated duplicate frees at least one 4 KiB block
   whatever its size, so on git-/CI-heavy trees - where savings hide in many small
   files - use a low `--min` or the `--git` preset below.
@@ -233,7 +237,7 @@ apfs-dedupe.sh [--apply] [--scope PATH] [--min SIZE] [--exclude GLOB] [--verbose
   reachable only with **Full Disk Access**, which can't be granted from a CLI.
   Grant it to your terminal app in System Settings -> Privacy & Security for an
   interactive run. A scheduled LaunchAgent/LaunchDaemon runs via `/bin/sh`, so the
-  only thing to grant would be the system shell - Full Disk Access for *every*
+  only thing to grant would be the system shell - Full Disk Access for _every_
   shell script, which this tool won't recommend; the daemon therefore stays out of
   those folders, and a periodic interactive run covers them.
 - `--verbose` - print a line per cloned file (in `--apply`) and per skipped file.
@@ -285,7 +289,7 @@ often Time Machine's **local** snapshots, which macOS takes hourly. Snapshots ar
 copy-on-write: one taken while a duplicate still held its own blocks keeps
 referencing those blocks, so the blocks dedup frees stay attached to the snapshot
 instead of returning to free space. The allocated figure is the best filesystem
-estimate of block reclaim; the *realized* free space lags until the snapshots
+estimate of block reclaim; the _realized_ free space lags until the snapshots
 holding the pre-dedup state are gone.
 
 Local Time Machine snapshots expire on their own (~24 hours, sooner under disk
@@ -299,7 +303,7 @@ df -h /System/Volumes/Data        # confirm
 
 This removes only **local** snapshots - your actual Time Machine backups on the
 external/network destination are untouched; the only cost is local hourly rollback
-points. New snapshots capture the *deduped* state, so they don't re-pin the freed
+points. New snapshots capture the _deduped_ state, so they don't re-pin the freed
 blocks: once the old snapshots clear, the reclaim sticks. After an `--apply`, the
 tool prints this reminder when local snapshots are present (a note only - it never
 deletes snapshots; that's your call).
@@ -312,7 +316,7 @@ run are reclaimed automatically.
 Both modes are **AC-gated**: a scheduled run that lands on battery - e.g. a laptop
 during a power outage - skips and defers to the next run on AC, so this best-effort
 cleanup never drains the battery (a desktop always reads as AC and so never skips).
-Only the run's *start* is gated: a sweep already in progress when AC is lost runs to
+Only the run's _start_ is gated: a sweep already in progress when AC is lost runs to
 completion.
 
 **Per-user (default)** - a **LaunchAgent** that runs as you, every day at 02:00,
@@ -361,8 +365,15 @@ that log size-capped and gzipped - macOS's own rotator, with archives kept
 whole-machine recurring runs; pass `--min 1` if you want the daemon to scan every
 non-empty file daily.
 
-Known limitation: `--system` stores this checkout's script path and the installer
-shell's `fclones`/`python3` search path in a root daemon. That is appropriate for a
+Under `sudo`, `PATH` leaves out Homebrew's prefixes, so `python3` there is the
+system's older one. The installer then takes the first Python 3.12 or newer in
+`/opt/homebrew/bin` or `/usr/local/bin` instead, and records that interpreter's
+absolute path in the job, so no `PATH` needs passing through `sudo`.
+
+Known limitation: `--system` stores this checkout's script path, the installer
+shell's `fclones` search path and the absolute path of its `python3` in a root
+daemon. The job runs the engine with that `python3`, since launchd's `PATH` can
+lead to an older one; re-run the installer after moving to another Python. That is appropriate for a
 self-managed personal machine or trusted CI host; a future hardening pass can
 require root-owned, non-group/world-writable tool paths before aiming this at
 adversarial multi-user machines.
@@ -387,18 +398,36 @@ Exclude such a tool's working trees, for example a CI runner's checkouts.
 
 ```sh
 sh test/test.sh                              # integration tests (macOS 15+, real clonefile, fclones)
-npx pyright@<version>                        # strict type check of lib/apply.py
-shellcheck apfs-dedupe.sh install-daily.sh test/test.sh
+pip install -r requirements-dev.txt && mypy  # strict type check of lib/apply.py
+npx pyright@<version>                        # the same, with pyright
 ```
 
-CI pins the pyright and shellcheck releases in `.github/workflows/ci.yml`; use
-the same ones, since another release can report differently.
+`requirements-dev.txt` pins mypy and `.github/workflows/ci.yml` pins pyright;
+use the same ones, since another release can report differently. CI also runs
+the checks every Curlew Labs repository shares
+([ci-baseline](https://github.com/curlewlabs-com/ci-baseline)): among them
+shellcheck, shfmt, ruff and prettier, under this repository's `pyproject.toml`
+and `.editorconfig`.
 
 `lib/apply.py` brands path strings as `FullPath` vs `Basename` (distinct
 `NewType`s), so a directory-relative component can't be passed - or logged - where
-a resolvable path belongs; `pyright` (strict) enforces it. All three checks run
-in CI on every PR.
+a resolvable path belongs; mypy and pyright (both strict) enforce it. All of
+these run in CI on every PR.
 
 ## License
 
-MIT. Duplicate detection is performed by [fclones](https://github.com/pkolaczk/fclones) (MIT).
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. Releases published under the MIT license alone may also be used
+under either license.
+
+### Contribution
+
+By submitting a contribution for inclusion in this project, you agree that it
+is dual licensed as above, without any additional terms or conditions.
+
+Duplicate detection is performed by
+[fclones](https://github.com/pkolaczk/fclones) (MIT).
