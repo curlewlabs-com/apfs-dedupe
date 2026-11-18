@@ -194,6 +194,17 @@ if [ "$ACTION" != "uninstall" ]; then
         fi
         exit 1
     }
+    # The interpreter itself, as it names itself: what PATH found can be a
+    # relative path, or a launcher such as a pyenv shim that picks its Python
+    # from an environment and working directory launchd does not reproduce.
+    PYTHON=$("$PYTHON" -c 'import sys; print(sys.executable)')
+    case "$PYTHON" in
+        /*) ;;
+        *)
+            echo "error: python3 does not report an absolute path for itself (got '$PYTHON')." >&2
+            exit 1
+            ;;
+    esac
 fi
 
 # PATH for the scheduled job. A LaunchAgent/LaunchDaemon inherits a minimal PATH

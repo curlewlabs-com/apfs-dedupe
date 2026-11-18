@@ -520,7 +520,7 @@ chmod +x "$d/old/python3" "$d/bin/fclones"
 "$HERE/../install-daily.sh" --print --scope "$d/scope" >"$d/job.plist"
 recorded=$(plutil -extract EnvironmentVariables.APFS_DEDUPE_PYTHON raw -o - "$d/job.plist" 2>/dev/null || true)
 case "$recorded" in
-    /*) assert_eq "interpreter: the job records the installer's python3" "$recorded" "$(command -v python3)" ;;
+    /*) assert_eq "interpreter: the job records the installer's python3" "$recorded" "$(python3 -c 'import sys; print(sys.executable)')" ;;
     *) fail "interpreter: the job does not name its python3 by absolute path (got '$recorded')" ;;
 esac
 rc=0

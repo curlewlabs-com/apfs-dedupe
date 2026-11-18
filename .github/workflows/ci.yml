@@ -26,7 +26,8 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.14"
+          # renovate: datasource=python-version depName=python
+          python-version: "3.14.10"
       - name: Install the pinned tools
         run: python -m pip install -r requirements-dev.txt
       - name: mypy (strict)
@@ -49,9 +50,12 @@ jobs:
         with:
           persist-credentials: false
       # The oldest Python the engine supports; test/test.sh runs it as python3.
+      # No updater comment: 3.12.10 is the last 3.12 release setup-python
+      # publishes a macOS build of (later ones are source-only security
+      # releases), so there is no newer pin to propose.
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.12"
+          python-version: "3.12.10"
       # The runner image ships rustup but not a fixed Rust, so the toolchain
       # that builds fclones is installed at an exact release.
       - name: install Rust
