@@ -1,0 +1,9 @@
+# mypy, which CI's lint job runs, and everything it installs, each at an exact
+# version so a resolver cannot move them. Nothing here is a runtime
+# dependency: the tool itself runs on the standard library.
+ast-serialize==0.13.1
+librt==0.16.0
+mypy==2.4.1
+mypy-extensions==1.1.0
+pathspec==1.1.1
+typing-extensions==4.16.0

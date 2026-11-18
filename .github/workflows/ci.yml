@@ -1,8 +1,9 @@
 name: CI
 
 # Gate every PR (and post-merge main) on the checks a contributor runs locally:
-# shellcheck + strict pyright on Linux, and the real-clonefile integration test
-# on macOS. See README "Development".
+# strict mypy and pyright on Linux, and the real-clonefile integration test on
+# macOS, plus the checks every Curlew Labs repository shares. See README
+# "Development".
 on:
   push:
     branches: [main]
@@ -23,17 +24,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Pin shellcheck to an exact release rather than ubuntu's preinstalled,
-      # floating version: older shellcheck misfires SC2317 on the trap-invoked
-      # cleanup() that 0.11.0 and later read correctly.
-      - name: shellcheck
-        run: |
-          # renovate: datasource=github-releases depName=koalaman/shellcheck extractVersion=^v(?<version>.+)$
-          ver=0.11.0
-          url="https://github.com/koalaman/shellcheck/releases/download/v${ver}/shellcheck-v${ver}.linux.x86_64.tar.xz"
-          curl -fsSL "$url" | tar -xJ
-          "shellcheck-v${ver}/shellcheck" --version
-          "shellcheck-v${ver}/shellcheck" apfs-dedupe.sh install-daily.sh test/test.sh
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          # renovate: datasource=python-version depName=python
+          python-version: "3.14.10"
+      - name: Install the pinned tools
+        run: python -m pip install -r requirements-dev.txt
+      - name: mypy (strict)
+        run: mypy
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           # renovate: datasource=node-version depName=node
@@ -43,13 +41,21 @@ jobs:
         run: npx --yes pyright@1.1.414
 
   test:
-    # macOS 15+ only: the apply uses CLONE_NOFOLLOW_ANY, which Apple's headers do
-    # not define before 15, so the symlink-source test cases require a 15 runner.
-    runs-on: macos-15
+    # The apply uses CLONE_NOFOLLOW_ANY, which Apple's headers do not define
+    # before macOS 15, so the symlink-source test cases need a runner at 15 or
+    # later.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The oldest Python the engine supports; test/test.sh runs it as python3.
+      # No updater comment: 3.12.10 is the last 3.12 release setup-python
+      # publishes a macOS build of (later ones are source-only security
+      # releases), so there is no newer pin to propose.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12.10"
       # The runner image ships rustup but not a fixed Rust, so the toolchain
       # that builds fclones is installed at an exact release.
       - name: install Rust
@@ -79,4 +85,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: curlewlabs-com/ci-baseline@c82082df9a3c5e6dab047d9ddb92f130f1537d8e # v0.1.1
+      - uses: curlewlabs-com/ci-baseline@f05f17a38ba2dfbaf0cde130a375b346e9a923a2 # v0.2.0
+
+  conclusion:
+    # The one check branch protection requires, so adding or renaming a job
+    # above needs no settings change - only this list.
+    needs: [lint, test, baseline]
+    runs-on: ubuntu-24.04
+    if: always()
+    steps:
+      - name: Require every job to pass
+        env:
+          LINT: ${{ needs.lint.result }}
+          TEST: ${{ needs.test.result }}
+          BASELINE: ${{ needs.baseline.result }}
+        run: test "$LINT" = success && test "$TEST" = success && test "$BASELINE" = success

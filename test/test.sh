@@ -13,43 +13,60 @@
 # so clonefile actually shares extents.
 set -eu
 
-HERE=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
+HERE=$(
+    unset CDPATH
+    cd -- "$(dirname -- "$0")" && pwd
+)
 ENGINE="$HERE/../lib/apply.py"
 SCRIPT="$HERE/../apfs-dedupe.sh"
 WORK=$(mktemp -d /private/tmp/apfsdedupe-test.XXXXXX)
 # shellcheck disable=SC2329  # invoked indirectly via the trap below
-cleanup() { chflags -R nouchg "$WORK" 2>/dev/null || true; rm -rf "$WORK"; }
-trap cleanup EXIT INT TERM
+cleanup() {
+    chflags -R nouchg "$WORK" 2>/dev/null || true
+    rm -rf "$WORK"
+}
+# After a set -u abort, macOS /bin/sh enters an EXIT trap with a stale $?, so
+# a run that stopped short would exit 0; RUN_COMPLETE tells the trap it did not.
+RUN_COMPLETE=0
+# shellcheck disable=SC2154  # the trap body assigns _trap_rc before it reads it
+trap '_trap_rc=$?; [ "$RUN_COMPLETE" = 1 ] || [ "$_trap_rc" -ne 0 ] || _trap_rc=1; cleanup; exit "$_trap_rc"' EXIT INT TERM
 
 FAILED=0
 pass() { printf 'PASS: %s\n' "$1"; }
-fail() { printf 'FAIL: %s\n' "$1"; FAILED=1; }
-assert_eq() {  # assert_eq LABEL ACTUAL EXPECTED
+fail() {
+    printf 'FAIL: %s\n' "$1"
+    FAILED=1
+}
+assert_eq() { # assert_eq LABEL ACTUAL EXPECTED
     if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (got '$2', want '$3')"; fi
 }
 
-report() {  # report CANONICAL DUP  ->  fclones-shaped JSON on stdout
+report() { # report CANONICAL DUP  ->  fclones-shaped JSON on stdout
     size=$(stat -f '%z' "$1")
     printf '{"header":{"stats":{"redundant_file_count":1,"redundant_file_size":%s}},' "$size"
     printf '"groups":[{"file_len":%s,"file_hash":"test","files":["%s","%s"]}]}' "$size" "$1" "$2"
 }
-ino()   { stat -f '%i'  "$1"; }
+ino() { stat -f '%i' "$1"; }
 perms() { stat -f '%Lp' "$1"; }
-mtime() { stat -f '%m'  "$1"; }
+mtime() { stat -f '%m' "$1"; }
 
 # ---- --apply clones and preserves all metadata, including the ACL ----
-d="$WORK/meta"; mkdir "$d"
-head -c 1048576 /dev/urandom > "$d/canon"; cp "$d/canon" "$d/dup"
-chmod 644 "$d/canon"; chmod 600 "$d/dup"
+d="$WORK/meta"
+mkdir "$d"
+head -c 1048576 /dev/urandom >"$d/canon"
+cp "$d/canon" "$d/dup"
+chmod 644 "$d/canon"
+chmod 600 "$d/dup"
 xattr -w com.example.tag DUPVAL "$d/dup"
 chmod +a "everyone allow read" "$d/dup"
 touch -t 202001010101 "$d/dup"
-ino_before=$(ino "$d/dup"); mt_before=$(mtime "$d/dup")
+ino_before=$(ino "$d/dup")
+mt_before=$(mtime "$d/dup")
 report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" >/dev/null 2>&1
 
 if [ "$(ino "$d/dup")" != "$ino_before" ]; then pass "apply: duplicate cloned (inode changed)"; else fail "apply: duplicate not cloned"; fi
 if cmp -s "$d/canon" "$d/dup"; then pass "apply: content identical after clone"; else fail "apply: content differs after clone"; fi
-assert_eq "apply: mode preserved"  "$(perms "$d/dup")" "600"
+assert_eq "apply: mode preserved" "$(perms "$d/dup")" "600"
 assert_eq "apply: mtime preserved" "$(mtime "$d/dup")" "$mt_before"
 assert_eq "apply: xattr preserved" "$(xattr -p com.example.tag "$d/dup" 2>/dev/null)" "DUPVAL"
 case "$(ls -le "$d/dup")" in
@@ -58,22 +75,27 @@ case "$(ls -le "$d/dup")" in
 esac
 
 # ---- dry-run changes nothing ----
-d="$WORK/dry"; mkdir "$d"
-head -c 1048576 /dev/urandom > "$d/canon"; cp "$d/canon" "$d/dup"
+d="$WORK/dry"
+mkdir "$d"
+head -c 1048576 /dev/urandom >"$d/canon"
+cp "$d/canon" "$d/dup"
 ino_before=$(ino "$d/dup")
 report "$d/canon" "$d/dup" | python3 "$ENGINE" >/dev/null 2>&1
 assert_eq "dry-run: nothing changed (inode stable)" "$(ino "$d/dup")" "$ino_before"
 
 # ---- fail-safe on an immutable file, and the skip names the full path ----
-d="$WORK/locked"; mkdir "$d"
-head -c 1048576 /dev/urandom > "$d/canon"; cp "$d/canon" "$d/dup"
+d="$WORK/locked"
+mkdir "$d"
+head -c 1048576 /dev/urandom >"$d/canon"
+cp "$d/canon" "$d/dup"
 chflags uchg "$d/dup"
 ino_before=$(ino "$d/dup")
 # Capture stderr, discard stdout (the summary): 2>&1 1>/dev/null inside $() points
 # fd2 at the capture pipe, then sends fd1 to /dev/null. --verbose makes the
 # per-file skip line (the full-path diagnostic asserted below) reach stderr;
 # without it skips are only counted in the summary.
-rc=0; err=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" --verbose 2>&1 1>/dev/null) || rc=$?
+rc=0
+err=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" --verbose 2>&1 1>/dev/null) || rc=$?
 chflags nouchg "$d/dup"
 if [ "$(ino "$d/dup")" = "$ino_before" ] && [ "$rc" -eq 0 ]; then
     pass "fail-safe: immutable file skipped, clean exit"
@@ -89,10 +111,12 @@ case "$err" in
 esac
 
 # ---- false-equal guard -- same size, different bytes, must NOT clone ----
-d="$WORK/falseeq"; mkdir "$d"
-head -c 1048576 /dev/urandom > "$d/canon"
-head -c 1048576 /dev/urandom > "$d/dup"   # same size, different content
-ino_before=$(ino "$d/dup"); sum_before=$(shasum "$d/dup" | cut -d' ' -f1)
+d="$WORK/falseeq"
+mkdir "$d"
+head -c 1048576 /dev/urandom >"$d/canon"
+head -c 1048576 /dev/urandom >"$d/dup" # same size, different content
+ino_before=$(ino "$d/dup")
+sum_before=$(shasum "$d/dup" | cut -d' ' -f1)
 report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" >/dev/null 2>&1
 if [ "$(ino "$d/dup")" = "$ino_before" ] && [ "$(shasum "$d/dup" | cut -d' ' -f1)" = "$sum_before" ]; then
     pass "verify: mismatched content left untouched"
@@ -103,17 +127,20 @@ fi
 # ---- the removed verification bypass is rejected before it can act ----
 # The byte re-compare is the live-data safety boundary. A stale bypass spelling
 # must fail closed at both entrypoints and leave mismatched files untouched.
-d="$WORK/removed-noverify"; mkdir "$d"
-head -c 4096 /dev/urandom > "$d/canon"
-head -c 4096 /dev/urandom > "$d/dup"
+d="$WORK/removed-noverify"
+mkdir "$d"
+head -c 4096 /dev/urandom >"$d/canon"
+head -c 4096 /dev/urandom >"$d/dup"
 sum_before=$(shasum "$d/dup" | cut -d' ' -f1)
-rc=0; report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" --no-verify >/dev/null 2>&1 || rc=$?
+rc=0
+report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" --no-verify >/dev/null 2>&1 || rc=$?
 if [ "$rc" -ne 0 ] && [ "$(shasum "$d/dup" | cut -d' ' -f1)" = "$sum_before" ]; then
     pass "verify: engine rejects removed bypass before touching mismatched bytes"
 else
     fail "verify: engine accepted removed bypass or modified mismatched bytes (rc=$rc)"
 fi
-rc=0; "$SCRIPT" --no-verify --scope "$d" --min 1 >/dev/null 2>&1 || rc=$?
+rc=0
+"$SCRIPT" --no-verify --scope "$d" --min 1 >/dev/null 2>&1 || rc=$?
 if [ "$rc" -ne 0 ] && [ "$(shasum "$d/dup" | cut -d' ' -f1)" = "$sum_before" ]; then
     pass "verify: wrapper rejects removed bypass before touching mismatched bytes"
 else
@@ -122,7 +149,8 @@ fi
 
 # ---- the /Users-not-/ guard refuses whole-machine roots ----
 # (the guard runs before the fclones check, so this needs no fclones on PATH)
-rc=0; "$SCRIPT" --scope / >/dev/null 2>&1 || rc=$?
+rc=0
+"$SCRIPT" --scope / >/dev/null 2>&1 || rc=$?
 if [ "$rc" -ne 0 ]; then pass "guard: refuses --scope /"; else fail "guard: did not refuse --scope /"; fi
 
 # ---- privileged ops are fd-anchored, so a swapped parent directory
@@ -133,8 +161,9 @@ if [ "$rc" -ne 0 ]; then pass "guard: refuses --scope /"; else fail "guard: did 
 # an arbitrary same-volume location. The engine pins the duplicate's parent by
 # fd and uses clonefileat/openat/renameatx_np; the swap below must NOT redirect the
 # write into the attacker's directory.
-d="$WORK/redirect"; mkdir "$d" "$d/real" "$d/attacker"
-head -c 4096 /dev/urandom > "$d/canon"
+d="$WORK/redirect"
+mkdir "$d" "$d/real" "$d/attacker"
+head -c 4096 /dev/urandom >"$d/canon"
 cp "$d/canon" "$d/real/dup"
 rc=0
 PYTHONPATH="$HERE/../lib" python3 - "$d" <<'PY' || rc=$?
@@ -168,10 +197,11 @@ fi
 # so a symlink anywhere in the path makes the open fail (skip) instead. The
 # redirect target below EXISTS, so a final-component-only guard would wrongly
 # succeed -- this distinguishes O_NOFOLLOW_ANY from plain O_NOFOLLOW.
-d="$WORK/intermediate"; mkdir -p "$d/real/sub" "$d/attacker/sub"
-head -c 1024 /dev/urandom > "$d/real/sub/dup"
+d="$WORK/intermediate"
+mkdir -p "$d/real/sub" "$d/attacker/sub"
+head -c 1024 /dev/urandom >"$d/real/sub/dup"
 mv "$d/real" "$d/real_moved"
-ln -s "$d/attacker" "$d/real"   # 'real' is now a symlink; real/sub resolves to attacker/sub (exists)
+ln -s "$d/attacker" "$d/real" # 'real' is now a symlink; real/sub resolves to attacker/sub (exists)
 rc=0
 PYTHONPATH="$HERE/../lib" python3 - "$d/real/sub/dup" <<'PY' || rc=$?
 import apply, os, sys
@@ -194,11 +224,12 @@ fi
 # into a file they own.
 # CLONE_NOFOLLOW_ANY must make the clone fail (skip), leaving the duplicate
 # untouched. The redirect target exists, so a final-only guard would clone it.
-d="$WORK/srcsym"; mkdir -p "$d/realsrc" "$d/secret" "$d/dest"
-head -c 2048 /dev/urandom > "$d/secret/canon"   # stands in for a root-only file
-head -c 2048 /dev/urandom > "$d/dest/dup"
+d="$WORK/srcsym"
+mkdir -p "$d/realsrc" "$d/secret" "$d/dest"
+head -c 2048 /dev/urandom >"$d/secret/canon" # stands in for a root-only file
+head -c 2048 /dev/urandom >"$d/dest/dup"
 dup_before=$(shasum "$d/dest/dup" | cut -d' ' -f1)
-ln -s "$d/secret" "$d/realsrc/link"             # canonical path traverses this symlink
+ln -s "$d/secret" "$d/realsrc/link" # canonical path traverses this symlink
 rc=0
 PYTHONPATH="$HERE/../lib" python3 - "$d" <<'PY' || rc=$?
 import apply, os, sys
@@ -224,11 +255,12 @@ fi
 # symlink. CLONE_NOFOLLOW_ANY refuses a symlink in ANY source component, the
 # last one included, so the clone fails (skip) rather than cloning the link
 # target's bytes into the duplicate.
-d="$WORK/srcfinal"; mkdir -p "$d/secret" "$d/dest"
-head -c 2048 /dev/urandom > "$d/secret/realcanon"   # the file the symlink points at
-head -c 2048 /dev/urandom > "$d/dest/dup"
+d="$WORK/srcfinal"
+mkdir -p "$d/secret" "$d/dest"
+head -c 2048 /dev/urandom >"$d/secret/realcanon" # the file the symlink points at
+head -c 2048 /dev/urandom >"$d/dest/dup"
 dup_before=$(shasum "$d/dest/dup" | cut -d' ' -f1)
-ln -s "$d/secret/realcanon" "$d/canon_link"         # canonical's final component is a symlink
+ln -s "$d/secret/realcanon" "$d/canon_link" # canonical's final component is a symlink
 rc=0
 PYTHONPATH="$HERE/../lib" python3 - "$d" <<'PY' || rc=$?
 import apply, os, sys
@@ -277,9 +309,11 @@ fi
 # independent files) and reclaim nothing, since the other link still pins the
 # inode's blocks. The dry-run projection must skip it too, so it matches apply --
 # otherwise the dry run promises space that --apply can never deliver.
-d="$WORK/hardlink"; mkdir "$d"
-head -c 1048576 /dev/urandom > "$d/canon"; cp "$d/canon" "$d/dup"
-ln "$d/dup" "$d/sibling"            # dup now has st_nlink=2, linked to an out-of-group path
+d="$WORK/hardlink"
+mkdir "$d"
+head -c 1048576 /dev/urandom >"$d/canon"
+cp "$d/canon" "$d/dup"
+ln "$d/dup" "$d/sibling" # dup now has st_nlink=2, linked to an out-of-group path
 ino_before=$(ino "$d/dup")
 errfile="$d/err.log"
 out=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" 2>"$errfile")
@@ -317,12 +351,14 @@ esac
 # the duplicate beneath it must be left untouched and surfaced as a permission
 # skip, not a per-file warning. (Non-root, like the rest of this suite -- root
 # would bypass the mode bits.) ----
-d="$WORK/perm"; mkdir "$d" "$d/locked"
-head -c 1048576 /dev/urandom > "$d/canon"; cp "$d/canon" "$d/locked/dup"
+d="$WORK/perm"
+mkdir "$d" "$d/locked"
+head -c 1048576 /dev/urandom >"$d/canon"
+cp "$d/canon" "$d/locked/dup"
 ino_before=$(ino "$d/locked/dup")
-chmod 000 "$d/locked"            # no search/read -> the engine cannot reach the dup
+chmod 000 "$d/locked" # no search/read -> the engine cannot reach the dup
 out=$(report "$d/canon" "$d/locked/dup" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" 2>/dev/null)
-chmod 755 "$d/locked"            # restore before asserting (and so cleanup can recurse)
+chmod 755 "$d/locked" # restore before asserting (and so cleanup can recurse)
 assert_eq "permission: unreadable duplicate left untouched" "$(ino "$d/locked/dup")" "$ino_before"
 case "$out" in
     *"unreadable (privacy protection or permissions)"*) pass "permission: skip bucketed as a permission denial" ;;
@@ -341,13 +377,15 @@ esac
 # enter the JSON -- the wrapper, not the engine, must summarize them. A real
 # duplicate pair sits alongside so the run still has work to report. Needs real
 # fclones. (Non-root, like the rest of the suite -- root bypasses the mode bits.) -
-d="$WORK/scanperm"; mkdir -p "$d/scope/readable" "$d/scope/denied"
-head -c 1048576 /dev/urandom > "$d/scope/readable/canon"; cp "$d/scope/readable/canon" "$d/scope/readable/dup"
-printf 'unreadable\n' > "$d/scope/denied/x"
-chmod 000 "$d/scope/denied"            # fclones cannot readdir this -> scan-time denial
+d="$WORK/scanperm"
+mkdir -p "$d/scope/readable" "$d/scope/denied"
+head -c 1048576 /dev/urandom >"$d/scope/readable/canon"
+cp "$d/scope/readable/canon" "$d/scope/readable/dup"
+printf 'unreadable\n' >"$d/scope/denied/x"
+chmod 000 "$d/scope/denied" # fclones cannot readdir this -> scan-time denial
 err=$("$SCRIPT" --scope "$d/scope" --min 1 2>&1 >/dev/null)
 verbose_err=$("$SCRIPT" --scope "$d/scope" --min 1 --verbose 2>&1 >/dev/null)
-chmod 755 "$d/scope/denied"            # restore before asserting (and so cleanup can recurse)
+chmod 755 "$d/scope/denied" # restore before asserting (and so cleanup can recurse)
 # Default: the raw per-folder "Permission denied" line is suppressed...
 case "$err" in
     *"Permission denied"*) fail "scan-perm: raw fclones permission line leaked without --verbose (got: $err)" ;;
@@ -369,14 +407,16 @@ esac
 # denial noise must not also hide a real failure (bad args, crash): stub fclones
 # to fail with a diagnostic on stderr; the wrapper must replay that diagnostic and
 # exit non-zero, not print a clean summary. ----
-d="$WORK/fcfail"; mkdir -p "$d/bin" "$d/scope"
-cat > "$d/bin/fclones" <<'EOF'
+d="$WORK/fcfail"
+mkdir -p "$d/bin" "$d/scope"
+cat >"$d/bin/fclones" <<'EOF'
 #!/bin/sh
 echo "fclones: error: something broke" >&2
 exit 2
 EOF
 chmod +x "$d/bin/fclones"
-rc=0; err=$(PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" 2>&1 >/dev/null) || rc=$?
+rc=0
+err=$(PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" 2>&1 >/dev/null) || rc=$?
 if [ "$rc" -ne 0 ]; then pass "fcfail: wrapper propagates a non-zero fclones exit"; else fail "fcfail: wrapper swallowed a fclones failure (rc=0)"; fi
 case "$err" in
     *"something broke"*) pass "fcfail: fclones' own diagnostic is surfaced, not hidden by the summary" ;;
@@ -390,25 +430,26 @@ esac
 # to record its argv and emit an empty report (so the real wrapper runs end to
 # end through the real engine), invoke it from a cwd that contains a file the
 # glob would match, and assert both excludes survived whole.
-d="$WORK/excludes"; mkdir -p "$d/bin" "$d/scope"
-cat > "$d/bin/fclones" <<EOF
+d="$WORK/excludes"
+mkdir -p "$d/bin" "$d/scope"
+cat >"$d/bin/fclones" <<EOF
 #!/bin/sh
 for a in "\$@"; do printf '%s\n' "\$a"; done > "$d/argv"
 printf '{"header":{"stats":{}},"groups":[]}\n'
 EOF
 chmod +x "$d/bin/fclones"
-touch "$d/scope/decoy.log"   # *.log would expand to this if globbed in the cwd
-( cd "$d/scope" && PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" \
-    --exclude "App Support" --exclude '*.log' ) >/dev/null 2>&1 || true
+touch "$d/scope/decoy.log" # *.log would expand to this if globbed in the cwd
+(cd "$d/scope" && PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" \
+    --exclude "App Support" --exclude '*.log') >/dev/null 2>&1 || true
 if grep -qxF 'App Support' "$d/argv" 2>/dev/null; then
     pass "excludes: a glob with spaces survives as a single fclones argument"
 else
-    fail "excludes: spaced glob was split (argv: $(tr '\n' '|' < "$d/argv" 2>/dev/null))"
+    fail "excludes: spaced glob was split (argv: $(tr '\n' '|' <"$d/argv" 2>/dev/null))"
 fi
 if grep -qxF '*.log' "$d/argv" 2>/dev/null; then
     pass "excludes: a glob is passed literally, not expanded against the cwd"
 else
-    fail "excludes: glob was expanded against the cwd (argv: $(tr '\n' '|' < "$d/argv" 2>/dev/null))"
+    fail "excludes: glob was expanded against the cwd (argv: $(tr '\n' '|' <"$d/argv" 2>/dev/null))"
 fi
 
 # ---- install-daily.sh --exclude reaches fclones through the installed job ----
@@ -419,20 +460,22 @@ fi
 # the job with --print, check it is a plist launchd can load, then run its exact
 # argv with fclones stubbed to record its own argv and pmset stubbed to report AC
 # (so --require-ac lets the run through), and assert every glob arrived whole.
-d="$WORK/install-excludes"; mkdir -p "$d/bin" "$d/scope"
-cat > "$d/bin/fclones" <<EOF
+d="$WORK/install-excludes"
+mkdir -p "$d/bin" "$d/scope"
+cat >"$d/bin/fclones" <<EOF
 #!/bin/sh
 for a in "\$@"; do printf '%s\n' "\$a"; done > "$d/argv"
 printf '{"header":{"stats":{}},"groups":[]}\n'
 EOF
-cat > "$d/bin/pmset" <<'EOF'
+cat >"$d/bin/pmset" <<'EOF'
 #!/bin/sh
 echo "Now drawing from 'AC Power'"
 EOF
 chmod +x "$d/bin/fclones" "$d/bin/pmset"
-touch "$d/scope/decoy.log"   # *.log would expand to this if globbed in the cwd
-rc=0; "$HERE/../install-daily.sh" --print --scope "$d/scope" \
-    --exclude 'App Support/**' --exclude '*.log' --exclude='R&D/**' > "$d/job.plist" || rc=$?
+touch "$d/scope/decoy.log" # *.log would expand to this if globbed in the cwd
+rc=0
+"$HERE/../install-daily.sh" --print --scope "$d/scope" \
+    --exclude 'App Support/**' --exclude '*.log' --exclude='R&D/**' >"$d/job.plist" || rc=$?
 assert_eq "install excludes: --print accepts both --exclude spellings" "$rc" "0"
 if plutil -lint "$d/job.plist" >/dev/null 2>&1; then
     pass "install excludes: the rendered job is a valid plist"
@@ -441,9 +484,11 @@ else
 fi
 # A subshell, so rebuilding the job's argv in "$@" leaves the script's own alone.
 (
-    i=0; set --
+    i=0
+    set --
     while arg=$(plutil -extract "ProgramArguments.$i" raw -o - "$d/job.plist" 2>/dev/null); do
-        set -- "$@" "$arg"; i=$((i + 1))
+        set -- "$@" "$arg"
+        i=$((i + 1))
     done
     cd "$d/scope" && PATH="$d/bin:$PATH" "$@"
 ) >/dev/null 2>&1 || true
@@ -451,9 +496,52 @@ for glob in 'App Support/**' '*.log' 'R&D/**'; do
     if grep -qxF -- "$glob" "$d/argv" 2>/dev/null; then
         pass "install excludes: '$glob' reaches fclones as one literal argument"
     else
-        fail "install excludes: '$glob' did not reach fclones whole (argv: $(tr '\n' '|' < "$d/argv" 2>/dev/null))"
+        fail "install excludes: '$glob' did not reach fclones whole (argv: $(tr '\n' '|' <"$d/argv" 2>/dev/null))"
     fi
 done
+
+# ---- the scheduled job runs the engine with the installer's python3, named by
+# absolute path, and a python3 older than 3.12 is refused before any scan ----
+# launchd starts the job with a PATH of its own, on which python3 can be an older
+# interpreter than the one the installer found, such as macOS's own, which cannot
+# run the engine. Both scripts must refuse one with a message saying what is
+# needed, rather than letting it fail inside the engine after a whole scan. The
+# stub stands in for an older python3: the version probe is all either script
+# asks of the interpreter before refusing.
+d="$WORK/interpreter"
+mkdir -p "$d/old" "$d/bin" "$d/scope"
+printf '#!/bin/sh\nexit 1\n' >"$d/old/python3"
+cat >"$d/bin/fclones" <<EOF
+#!/bin/sh
+touch "$d/fclones-ran"
+printf '{"header":{"stats":{}},"groups":[]}\n'
+EOF
+chmod +x "$d/old/python3" "$d/bin/fclones"
+"$HERE/../install-daily.sh" --print --scope "$d/scope" >"$d/job.plist"
+recorded=$(plutil -extract EnvironmentVariables.APFS_DEDUPE_PYTHON raw -o - "$d/job.plist" 2>/dev/null || true)
+case "$recorded" in
+    /*) assert_eq "interpreter: the job records the installer's python3" "$recorded" "$(python3 -c 'import sys; print(sys.executable)')" ;;
+    *) fail "interpreter: the job does not name its python3 by absolute path (got '$recorded')" ;;
+esac
+rc=0
+err=$(PATH="$d/old:$PATH" "$HERE/../install-daily.sh" --print --scope "$d/scope" 2>&1 >/dev/null) || rc=$?
+case "$rc:$err" in
+    0:*) fail "interpreter: the installer accepted a python3 older than 3.12" ;;
+    *"older than Python 3.12"*) pass "interpreter: the installer refuses a python3 older than 3.12" ;;
+    *) fail "interpreter: the installer refused without saying why (got: $err)" ;;
+esac
+rc=0
+err=$(APFS_DEDUPE_PYTHON="$d/old/python3" PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" 2>&1 >/dev/null) || rc=$?
+case "$rc:$err" in
+    0:*) fail "interpreter: the wrapper ran with a python3 older than 3.12" ;;
+    *"older than Python 3.12"*) pass "interpreter: the wrapper refuses a python3 older than 3.12" ;;
+    *) fail "interpreter: the wrapper refused without saying why (got: $err)" ;;
+esac
+if [ -e "$d/fclones-ran" ]; then
+    fail "interpreter: the wrapper scanned before refusing the interpreter"
+else
+    pass "interpreter: the wrapper refuses before it scans"
+fi
 
 # ---- the dry-run plan and the --apply audit trail go to STDOUT (so '> file'
 # keeps them), and per-file --apply lines are opt-in. The dry-run plan is its
@@ -461,8 +549,10 @@ done
 # by default -- a nightly /Users sweep clones tens of thousands of files and one
 # line each would bury the log -- and restores the per-file `cloned` audit line
 # under --verbose. (progress/warnings stay on stderr, dropped here with 2>/dev/null.)
-d="$WORK/stdout"; mkdir "$d"
-head -c 1048576 /dev/urandom > "$d/canon"; cp "$d/canon" "$d/dup"
+d="$WORK/stdout"
+mkdir "$d"
+head -c 1048576 /dev/urandom >"$d/canon"
+cp "$d/canon" "$d/dup"
 plan=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" 2>/dev/null)
 case "$plan" in
     *"would clone "*"$d/dup"*) pass "dry-run: the plan is on stdout (captured by > file)" ;;
@@ -471,7 +561,8 @@ esac
 # --apply without --verbose: the per-file `cloned` line is suppressed (the log-
 # volume lever) but the summary still reports the reclaim. "cloned " appears only
 # in the per-file line, never the summary, so its presence here is a leak.
-head -c 1048576 /dev/urandom > "$d/canon2"; cp "$d/canon2" "$d/dup2"
+head -c 1048576 /dev/urandom >"$d/canon2"
+cp "$d/canon2" "$d/dup2"
 applied=$(report "$d/canon2" "$d/dup2" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" 2>/dev/null)
 case "$applied" in
     *"cloned "*"$d/dup2"*) fail "apply: per-file clone line leaked without --verbose (got: $applied)" ;;
@@ -479,7 +570,8 @@ case "$applied" in
     *) fail "apply: default output missing the reclaim summary (got: $applied)" ;;
 esac
 # --apply --verbose restores the per-file `cloned` audit line on stdout.
-head -c 1048576 /dev/urandom > "$d/canon3"; cp "$d/canon3" "$d/dup3"
+head -c 1048576 /dev/urandom >"$d/canon3"
+cp "$d/canon3" "$d/dup3"
 verbose_applied=$(report "$d/canon3" "$d/dup3" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" --verbose 2>/dev/null)
 case "$verbose_applied" in
     *"cloned "*"$d/dup3"*) pass "apply: --verbose restores the per-file clone audit line on stdout" ;;
@@ -491,12 +583,15 @@ esac
 # they can focus on apply invariants. This smoke covers the separate external
 # contract: the real wrapper command, fclones JSON output, and engine stdin path
 # must still compose end to end.
-d="$WORK/real-fclones"; mkdir "$d"
-head -c 4096 /dev/urandom > "$d/canon"; cp "$d/canon" "$d/dup"
+d="$WORK/real-fclones"
+mkdir "$d"
+head -c 4096 /dev/urandom >"$d/canon"
+cp "$d/canon" "$d/dup"
 dry=$("$SCRIPT" --scope "$d" --min 1 2>/dev/null)
 case "$dry" in
-    *"would clone "*"$d/canon"*"$d/dup"*|*"would clone "*"$d/dup"*"$d/canon"*)
-        pass "wrapper: real fclones dry-run reports the duplicate pair" ;;
+    *"would clone "*"$d/canon"*"$d/dup"* | *"would clone "*"$d/dup"*"$d/canon"*)
+        pass "wrapper: real fclones dry-run reports the duplicate pair"
+        ;;
     *) fail "wrapper: real fclones dry-run did not report the duplicate pair (got: $dry)" ;;
 esac
 # The summary leads with the files fclones considered (2: canon + dup) and the
@@ -507,10 +602,11 @@ case "$dry" in
     *"scanned: 2 files in "*) pass "wrapper: summary reports files-scanned and scan duration" ;;
     *) fail "wrapper: summary missing the scanned/duration line (got: $dry)" ;;
 esac
-a_before=$(ino "$d/canon"); b_before=$(ino "$d/dup")
+a_before=$(ino "$d/canon")
+b_before=$(ino "$d/dup")
 applied=$("$SCRIPT" --apply --scope "$d" --min 1 2>/dev/null)
 if cmp -s "$d/canon" "$d/dup" \
-   && { [ "$(ino "$d/canon")" != "$a_before" ] || [ "$(ino "$d/dup")" != "$b_before" ]; }; then
+    && { [ "$(ino "$d/canon")" != "$a_before" ] || [ "$(ino "$d/dup")" != "$b_before" ]; }; then
     pass "wrapper: real fclones apply preserves bytes and replaces one duplicate"
 else
     fail "wrapper: real fclones apply did not clone a duplicate (got: $applied)"
@@ -521,8 +617,9 @@ fi
 # fclones reword, a non-English locale), the count is dropped and the summary
 # reports the scan duration alone -- never a wrong number, never a failure. Stub
 # fclones to emit a valid report but NO "matching selection criteria" line. ----
-d="$WORK/scancount"; mkdir -p "$d/bin" "$d/scope"
-cat > "$d/bin/fclones" <<'EOF'
+d="$WORK/scancount"
+mkdir -p "$d/bin" "$d/scope"
+cat >"$d/bin/fclones" <<'EOF'
 #!/bin/sh
 echo "fclones: info: a log line that is not the files-considered count" >&2
 printf '{"header":{"stats":{}},"groups":[]}\n'
@@ -538,8 +635,9 @@ esac
 # ---- and when fclones DOES report the count, thousands separators are stripped:
 # a large count prints as "Found 1,234 ... files matching selection criteria", but
 # the summary must show a clean integer. Stub fclones to emit the comma'd line. ----
-d="$WORK/scancomma"; mkdir -p "$d/bin" "$d/scope"
-cat > "$d/bin/fclones" <<'EOF'
+d="$WORK/scancomma"
+mkdir -p "$d/bin" "$d/scope"
+cat >"$d/bin/fclones" <<'EOF'
 #!/bin/sh
 echo "[2026-05-26 00:00:00.000] fclones:  info: Found 1,234 (5.6 GB) files matching selection criteria" >&2
 printf '{"header":{"stats":{}},"groups":[]}\n'
@@ -598,8 +696,10 @@ fi
 # never promises space a real re-run can't deliver. macOS `cp` (no -c) makes an
 # independent copy, so the FIRST run genuinely clones -- guarding against a
 # false positive that would skip fresh duplicates. ----
-d="$WORK/alreadyshared"; mkdir "$d"
-head -c 1048576 /dev/urandom > "$d/canon"; cp "$d/canon" "$d/dup"
+d="$WORK/alreadyshared"
+mkdir "$d"
+head -c 1048576 /dev/urandom >"$d/canon"
+cp "$d/canon" "$d/dup"
 out1=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" --apply --work-dir "$WORK/.work" 2>/dev/null)
 ino1=$(ino "$d/dup")
 case "$out1" in
@@ -637,9 +737,10 @@ esac
 # and keep the fclones/logical byte count as secondary context. The canonical is
 # dense so the all-hole duplicate's map differs from it -- a would-clone, not the
 # identical-map already-shared case the next test covers.
-d="$WORK/sparse"; mkdir "$d"
-head -c 1048576 /dev/urandom > "$d/canon"                            # dense 1 MiB canonical
-dd if=/dev/zero of="$d/dup" bs=1 count=0 seek=1048576 2>/dev/null    # all-hole dup: 1 MiB logical, 0 blocks
+d="$WORK/sparse"
+mkdir "$d"
+head -c 1048576 /dev/urandom >"$d/canon"                          # dense 1 MiB canonical
+dd if=/dev/zero of="$d/dup" bs=1 count=0 seek=1048576 2>/dev/null # all-hole dup: 1 MiB logical, 0 blocks
 dry=$(report "$d/canon" "$d/dup" | python3 "$ENGINE" 2>/dev/null)
 case "$dry" in
     *"would reclaim: 0.0 B allocated (1.0 MiB logical) across 1 files"*) pass "accounting: sparse duplicate reports allocated bytes before logical bytes" ;;
@@ -654,10 +755,11 @@ esac
 # saved. The engine compares the FULL extent map, so the diverged extent makes
 # `multi`'s map differ from the original's: a mismatch it clones (re-sharing the
 # broken range), never a trusted already-shared. ----
-d="$WORK/partialshare"; mkdir "$d"
-head -c 1048576 /dev/urandom > "$d/single"        # one contiguous extent
-cp -c "$d/single" "$d/multi"                       # full clone, then...
-python3 - "$d/multi" <<'PY'                         # ...CoW-break an interior block with its OWN bytes
+d="$WORK/partialshare"
+mkdir "$d"
+head -c 1048576 /dev/urandom >"$d/single" # one contiguous extent
+cp -c "$d/single" "$d/multi"              # full clone, then...
+python3 - "$d/multi" <<'PY'               # ...CoW-break an interior block with its OWN bytes
 import os, sys
 fd = os.open(sys.argv[1], os.O_RDWR)
 off = 512 * 1024
@@ -698,7 +800,8 @@ fi
 # multi-extent layout (data | hole | data); `cp -c` clones it, and clonefile
 # reproduces the whole map, hole included, so the clone's map equals the
 # canonical's and the engine must report it as already-saved, reclaiming nothing.
-d="$WORK/multiextent"; mkdir "$d"
+d="$WORK/multiextent"
+mkdir "$d"
 python3 - "$d/canon" <<'PY'
 import fcntl, os, struct, sys
 F_PUNCHHOLE = 99
@@ -709,7 +812,7 @@ os.write(fd, b"\xab" * (16 * 1024 * 1024))
 fcntl.fcntl(fd, F_PUNCHHOLE, struct.pack("=IIqq", 0, 0, 4 * 1024 * 1024, 8 * 1024 * 1024))
 os.fsync(fd); os.close(fd)
 PY
-cp -c "$d/canon" "$d/dup"                          # clonefile: dup shares canon's full map, hole included
+cp -c "$d/canon" "$d/dup" # clonefile: dup shares canon's full map, hole included
 # Premise: canon really is multi-extent and the clone's map matches it -- a
 # single-extent file would have passed the old check too and proven nothing.
 rc=0
@@ -739,8 +842,9 @@ esac
 # happen at fclones read-time, so the protection must be a scan exclude (not just
 # an apply-time skip). Stub fclones to record its argv and assert the defaults
 # are present, and dropped under --include-cloud. ----
-d="$WORK/cloud"; mkdir -p "$d/bin" "$d/scope"
-cat > "$d/bin/fclones" <<EOF
+d="$WORK/cloud"
+mkdir -p "$d/bin" "$d/scope"
+cat >"$d/bin/fclones" <<EOF
 #!/bin/sh
 for a in "\$@"; do printf '%s\n' "\$a"; done > "$d/argv"
 printf '{"header":{"stats":{}},"groups":[]}\n'
@@ -748,11 +852,11 @@ EOF
 chmod +x "$d/bin/fclones"
 PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" >/dev/null 2>&1 || true
 if grep -qxF '**/Library/Mobile Documents/**' "$d/argv" 2>/dev/null \
-   && grep -qxF '**/Library/CloudStorage/**' "$d/argv" 2>/dev/null \
-   && grep -qxF '**/*.photoslibrary/**' "$d/argv" 2>/dev/null; then
+    && grep -qxF '**/Library/CloudStorage/**' "$d/argv" 2>/dev/null \
+    && grep -qxF '**/*.photoslibrary/**' "$d/argv" 2>/dev/null; then
     pass "dataless: cloud roots (iCloud Drive, CloudStorage, Photos) are excluded from the scan by default"
 else
-    fail "dataless: default cloud excludes missing (argv: $(tr '\n' '|' < "$d/argv" 2>/dev/null))"
+    fail "dataless: default cloud excludes missing (argv: $(tr '\n' '|' <"$d/argv" 2>/dev/null))"
 fi
 PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" --include-cloud >/dev/null 2>&1 || true
 if grep -qxF '**/Library/Mobile Documents/**' "$d/argv" 2>/dev/null; then
@@ -785,8 +889,9 @@ fi
 # a whole 4 KiB block when deduped, so there is no useful floor for git-/CI-heavy
 # trees -- and an explicit --min still overrides it, in either order.
 # Stub fclones to report the --min value it actually received. ----
-d="$WORK/gitpreset"; mkdir -p "$d/bin" "$d/scope"
-cat > "$d/bin/fclones" <<EOF
+d="$WORK/gitpreset"
+mkdir -p "$d/bin" "$d/scope"
+cat >"$d/bin/fclones" <<EOF
 #!/bin/sh
 prev=""; for a in "\$@"; do [ "\$prev" = "--min" ] && printf 'min=%s\n' "\$a"; prev="\$a"; done > "$d/argv"
 printf '{"header":{"stats":{}},"groups":[]}\n'
@@ -803,13 +908,14 @@ assert_eq "min: explicit --min before --git wins (order-independent)" "$(cat "$d
 # may still hold the reclaimed space (a common source of confusion) -- a note
 # only, on stderr, never deleting snapshots; and no note when none are present.
 # Stub fclones (empty report) and tmutil to control whether snapshots "exist". ----
-d="$WORK/snapnote"; mkdir -p "$d/bin" "$d/scope"
-cat > "$d/bin/fclones" <<'EOF'
+d="$WORK/snapnote"
+mkdir -p "$d/bin" "$d/scope"
+cat >"$d/bin/fclones" <<'EOF'
 #!/bin/sh
 printf '{"header":{"stats":{}},"groups":[]}\n'
 EOF
 chmod +x "$d/bin/fclones"
-cat > "$d/bin/tmutil" <<'EOF'
+cat >"$d/bin/tmutil" <<'EOF'
 #!/bin/sh
 echo "com.apple.TimeMachine.2026-05-25-020000.local"
 EOF
@@ -819,7 +925,7 @@ case "$note" in
     *thinlocalsnapshots*) pass "snapshots: --apply warns that local snapshots may hold the reclaimed space" ;;
     *) fail "snapshots: apply did not surface the snapshot note (got: $note)" ;;
 esac
-cat > "$d/bin/tmutil" <<'EOF'
+cat >"$d/bin/tmutil" <<'EOF'
 #!/bin/sh
 EOF
 note2=$(PATH="$d/bin:$PATH" "$SCRIPT" --apply --scope "$d/scope" 2>&1 >/dev/null)
@@ -837,8 +943,9 @@ esac
 # growth. Stub fclones (empty report) so the run is a fast no-op around the
 # rotation, which happens at startup before fclones is called. Size-gated, so the
 # test is deterministic with no clock dependence. ----
-d="$WORK/logrotate"; mkdir -p "$d/bin" "$d/scope"
-cat > "$d/bin/fclones" <<'EOF'
+d="$WORK/logrotate"
+mkdir -p "$d/bin" "$d/scope"
+cat >"$d/bin/fclones" <<'EOF'
 #!/bin/sh
 printf '{"header":{"stats":{}},"groups":[]}\n'
 EOF
@@ -846,18 +953,22 @@ chmod +x "$d/bin/fclones"
 log="$d/agent.log"
 marker="ROTATED_CONTENT_MARKER"
 # A log over the 1 MiB cap, led by a marker we must find again in the archive.
-{ printf '%s\n' "$marker"; head -c 1100000 /dev/zero | tr '\0' 'x'; } > "$log"
+{
+    printf '%s\n' "$marker"
+    head -c 1100000 /dev/zero | tr '\0' 'x'
+} >"$log"
 APFS_DEDUPE_LOGFILE="$log" PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" >/dev/null 2>&1 || true
 # The live log is truncated (the run wrote nothing to it -- launchd does that in
 # production -- so it is now empty) and its prior content lives in the gz archive.
 if [ -f "$log.1.gz" ] && ! grep -qF "$marker" "$log" 2>/dev/null \
-   && gunzip -c "$log.1.gz" 2>/dev/null | grep -qF "$marker"; then
+    && gunzip -c "$log.1.gz" 2>/dev/null | grep -qF "$marker"; then
     pass "logrotate: oversized agent log truncated in place, prior content preserved gzipped"
 else
     fail "logrotate: oversized log not rotated into the archive (live size $(stat -f %z "$log" 2>/dev/null))"
 fi
 # A log under the cap is left untouched -- no spurious rotation or churn.
-small="$d/small.log"; printf 'under the cap\n' > "$small"
+small="$d/small.log"
+printf 'under the cap\n' >"$small"
 APFS_DEDUPE_LOGFILE="$small" PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" >/dev/null 2>&1 || true
 if [ ! -f "$small.1.gz" ] && [ "$(cat "$small")" = "under the cap" ]; then
     pass "logrotate: a log under the cap is left untouched"
@@ -870,7 +981,7 @@ fi
 # over the cap, then runs. With the one rotation above, that is five rotations.
 i=0
 while [ "$i" -lt 4 ]; do
-    head -c 1100000 /dev/zero | tr '\0' 'x' > "$log"
+    head -c 1100000 /dev/zero | tr '\0' 'x' >"$log"
     APFS_DEDUPE_LOGFILE="$log" PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" >/dev/null 2>&1 || true
     i=$((i + 1))
 done
@@ -883,14 +994,14 @@ assert_eq "logrotate: archives bounded at the keep count after repeated rotation
 # redirection would exit non-zero right there, before fclones ever runs; the guard
 # keeps the sweep going. Assert the run still finishes cleanly (the no-op sweep's 0).
 ro="$d/readonly.log"
-head -c 1100000 /dev/zero | tr '\0' 'x' > "$ro"
+head -c 1100000 /dev/zero | tr '\0' 'x' >"$ro"
 chmod 0444 "$ro"
 if APFS_DEDUPE_LOGFILE="$ro" PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" >/dev/null 2>&1; then
     ro_rc=0
 else
     ro_rc=$?
 fi
-chmod 0644 "$ro"   # restore so the $WORK cleanup can remove it
+chmod 0644 "$ro" # restore so the $WORK cleanup can remove it
 assert_eq "logrotate: a truncate it cannot perform does not abort the sweep" "$ro_rc" "0"
 
 # ---- app-private Library data (Mail/Messages/Safari/Containers) is
@@ -900,8 +1011,9 @@ assert_eq "logrotate: a truncate it cannot perform does not abort the sweep" "$r
 # independent branch with a real consequence (privacy + prompt noise), so stub
 # fclones to record its argv and assert the defaults are present, then dropped
 # under the flag. ----
-d="$WORK/appdata"; mkdir -p "$d/bin" "$d/scope"
-cat > "$d/bin/fclones" <<EOF
+d="$WORK/appdata"
+mkdir -p "$d/bin" "$d/scope"
+cat >"$d/bin/fclones" <<EOF
 #!/bin/sh
 for a in "\$@"; do printf '%s\n' "\$a"; done > "$d/argv"
 printf '{"header":{"stats":{}},"groups":[]}\n'
@@ -909,13 +1021,13 @@ EOF
 chmod +x "$d/bin/fclones"
 PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" >/dev/null 2>&1 || true
 if grep -qxF '**/Library/Mail/**' "$d/argv" 2>/dev/null \
-   && grep -qxF '**/Library/Messages/**' "$d/argv" 2>/dev/null \
-   && grep -qxF '**/Library/Safari/**' "$d/argv" 2>/dev/null \
-   && grep -qxF '**/Library/Containers/**' "$d/argv" 2>/dev/null \
-   && grep -qxF '**/Library/Group Containers/**' "$d/argv" 2>/dev/null; then
+    && grep -qxF '**/Library/Messages/**' "$d/argv" 2>/dev/null \
+    && grep -qxF '**/Library/Safari/**' "$d/argv" 2>/dev/null \
+    && grep -qxF '**/Library/Containers/**' "$d/argv" 2>/dev/null \
+    && grep -qxF '**/Library/Group Containers/**' "$d/argv" 2>/dev/null; then
     pass "app-data: Mail/Messages/Safari/Containers excluded from the scan by default"
 else
-    fail "app-data: default app-private excludes missing (argv: $(tr '\n' '|' < "$d/argv" 2>/dev/null))"
+    fail "app-data: default app-private excludes missing (argv: $(tr '\n' '|' <"$d/argv" 2>/dev/null))"
 fi
 PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" --include-app-data >/dev/null 2>&1 || true
 if grep -qxF '**/Library/Mail/**' "$d/argv" 2>/dev/null; then
@@ -930,8 +1042,9 @@ fi
 # (files pending deletion) are never useful dedup targets. --include-app-data
 # re-includes the ~/Library set; the Trash exclude is unconditional. Stub fclones
 # to record argv and assert both. ----
-d="$WORK/osdata"; mkdir -p "$d/bin" "$d/scope"
-cat > "$d/bin/fclones" <<EOF
+d="$WORK/osdata"
+mkdir -p "$d/bin" "$d/scope"
+cat >"$d/bin/fclones" <<EOF
 #!/bin/sh
 for a in "\$@"; do printf '%s\n' "\$a"; done > "$d/argv"
 printf '{"header":{"stats":{}},"groups":[]}\n'
@@ -939,12 +1052,12 @@ EOF
 chmod +x "$d/bin/fclones"
 PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" >/dev/null 2>&1 || true
 if grep -qxF '**/Library/Metadata/CoreSpotlight/**' "$d/argv" 2>/dev/null \
-   && grep -qxF '**/Library/Daemon Containers/**' "$d/argv" 2>/dev/null \
-   && grep -qxF '**/.Trash/**' "$d/argv" 2>/dev/null \
-   && grep -qxF '**/.Trashes/**' "$d/argv" 2>/dev/null; then
+    && grep -qxF '**/Library/Daemon Containers/**' "$d/argv" 2>/dev/null \
+    && grep -qxF '**/.Trash/**' "$d/argv" 2>/dev/null \
+    && grep -qxF '**/.Trashes/**' "$d/argv" 2>/dev/null; then
     pass "system-data: OS-managed Library trees and the Trash excluded by default"
 else
-    fail "system-data: default system/Trash excludes missing (argv: $(tr '\n' '|' < "$d/argv" 2>/dev/null))"
+    fail "system-data: default system/Trash excludes missing (argv: $(tr '\n' '|' <"$d/argv" 2>/dev/null))"
 fi
 PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d/scope" --include-app-data >/dev/null 2>&1 || true
 if grep -qxF '**/Library/Metadata/CoreSpotlight/**' "$d/argv" 2>/dev/null; then
@@ -962,19 +1075,21 @@ fi
 # battery and fclones to record whether it ran: the wrapper must exit 0 (deferred,
 # not failed) WITHOUT scanning, since the gate sits before the scan. (Stubbing pmset
 # on PATH mirrors the tmutil/fclones stubs above.)
-d="$WORK/requireac-batt"; mkdir -p "$d/bin" "$d/scope"
-cat > "$d/bin/pmset" <<'EOF'
+d="$WORK/requireac-batt"
+mkdir -p "$d/bin" "$d/scope"
+cat >"$d/bin/pmset" <<'EOF'
 #!/bin/sh
 echo "Now drawing from 'Battery Power'"
 EOF
 chmod +x "$d/bin/pmset"
-cat > "$d/bin/fclones" <<EOF
+cat >"$d/bin/fclones" <<EOF
 #!/bin/sh
 : > "$d/fclones-ran"
 printf '{"header":{"stats":{}},"groups":[]}\n'
 EOF
 chmod +x "$d/bin/fclones"
-rc=0; out=$(PATH="$d/bin:$PATH" "$SCRIPT" --require-ac --apply --scope "$d/scope" --min 1 2>&1) || rc=$?
+rc=0
+out=$(PATH="$d/bin:$PATH" "$SCRIPT" --require-ac --apply --scope "$d/scope" --min 1 2>&1) || rc=$?
 assert_eq "require-ac: a battery run exits 0 (deferred, not failed)" "$rc" "0"
 if [ ! -e "$d/fclones-ran" ]; then
     pass "require-ac: on battery the sweep defers before scanning (fclones never ran)"
@@ -991,17 +1106,20 @@ esac
 # as AC) the sweep runs as usual. Stub pmset to report AC, leave real fclones on
 # PATH, and confirm a real duplicate is still cloned -- proof the gate lets an AC
 # run through end to end.
-d="$WORK/requireac-ac"; mkdir -p "$d/bin" "$d/scope"
-cat > "$d/bin/pmset" <<'EOF'
+d="$WORK/requireac-ac"
+mkdir -p "$d/bin" "$d/scope"
+cat >"$d/bin/pmset" <<'EOF'
 #!/bin/sh
 echo "Now drawing from 'AC Power'"
 EOF
 chmod +x "$d/bin/pmset"
-head -c 4096 /dev/urandom > "$d/scope/canon"; cp "$d/scope/canon" "$d/scope/dup"
-a_before=$(ino "$d/scope/canon"); b_before=$(ino "$d/scope/dup")
+head -c 4096 /dev/urandom >"$d/scope/canon"
+cp "$d/scope/canon" "$d/scope/dup"
+a_before=$(ino "$d/scope/canon")
+b_before=$(ino "$d/scope/dup")
 PATH="$d/bin:$PATH" "$SCRIPT" --require-ac --apply --scope "$d/scope" --min 1 >/dev/null 2>&1
 if cmp -s "$d/scope/canon" "$d/scope/dup" \
-   && { [ "$(ino "$d/scope/canon")" != "$a_before" ] || [ "$(ino "$d/scope/dup")" != "$b_before" ]; }; then
+    && { [ "$(ino "$d/scope/canon")" != "$a_before" ] || [ "$(ino "$d/scope/dup")" != "$b_before" ]; }; then
     pass "require-ac: on AC the sweep runs and clones a duplicate"
 else
     fail "require-ac: on AC the gate wrongly blocked the sweep"
@@ -1014,12 +1132,15 @@ if ! python3 "$HERE/test_concurrent_writers.py"; then FAILED=1; fi
 if ! python3 "$HERE/test_inspect.py"; then FAILED=1; fi
 
 # ---- a real run leaves no work files in the tree, and skips its own directory ----
-d="$WORK/workdir"; mkdir -p "$d/tree/a" "$d/tree/b"
-head -c 65536 /dev/urandom > "$d/tree/a/f"; cp "$d/tree/a/f" "$d/tree/b/f"
+d="$WORK/workdir"
+mkdir -p "$d/tree/a" "$d/tree/b"
+head -c 65536 /dev/urandom >"$d/tree/a/f"
+cp "$d/tree/a/f" "$d/tree/b/f"
 sh "$SCRIPT" --scope "$d/tree" --min 1 --apply >/dev/null 2>&1
 assert_eq "work dir: private to the user" "$(stat -f '%Lp' "$d/tree/.apfsdedupe-work")" "700"
 assert_eq "work dir: empty after a clean run" "$(find "$d/tree/.apfsdedupe-work" -type f | wc -l | tr -d ' ')" "0"
-echo planted > "$d/tree/.apfsdedupe-work/kept"; cp "$d/tree/.apfsdedupe-work/kept" "$d/tree/a/also"
+echo planted >"$d/tree/.apfsdedupe-work/kept"
+cp "$d/tree/.apfsdedupe-work/kept" "$d/tree/a/also"
 sh "$SCRIPT" --scope "$d/tree" --min 1 --apply >"$d/out" 2>&1
 assert_eq "work dir: a run does not delete what an earlier run kept" "$(cat "$d/tree/.apfsdedupe-work/kept")" "planted"
 case "$(cat "$d/out")" in
@@ -1029,4 +1150,6 @@ esac
 
 echo
 if [ "$FAILED" -eq 0 ]; then echo "all tests passed"; else echo "some tests FAILED"; fi
-exit "$FAILED"
+[ "$FAILED" -eq 0 ] || exit "$FAILED"
+RUN_COMPLETE=1
+exit 0

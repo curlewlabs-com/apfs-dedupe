@@ -36,7 +36,7 @@ macOS:
 ### 1. Windowless and crash-safe
 
 `fclones` routes its reflink through a generic `safe_remove` wrapper that renames
-the original aside *first*, then clones the canonical into the original's name,
+the original aside _first_, then clones the canonical into the original's name,
 then deletes the saved-aside copy. Between the rename and the clone the path has
 no file - observable by a concurrent reader, and left that way across a crash in
 that interval (the data is stranded under a temp name).
@@ -68,7 +68,7 @@ a flag or overrides an ACL to force a dedup.
 
 The apply runs as root over user-writable directories, so the duplicate's
 parent directory is controlled by a potential attacker. `clonefile(2)` follows
-symlinks in the *destination path*, including intermediate components: cloning
+symlinks in the _destination path_, including intermediate components: cloning
 to `tmp/clone` where `tmp` is a symlink creates the file under the symlink's
 target. A temp chosen by path is therefore not enough - even an unguessable
 name in a freshly created `mkdtemp` directory, because a local user who owns the
@@ -77,12 +77,12 @@ creation and the clone, redirecting a root clone (with bytes they also control,
 since the "canonical" can be their file) into an arbitrary same-volume path such
 as a LaunchDaemon plist. `/Users` and `/Library` share the data volume
 `clonefile` is restricted to, so the same-volume limit is no barrier. `mkdtemp`
-plus `CLONE_NOFOLLOW` stops a *pre-planted* symlink and a *final-component*
+plus `CLONE_NOFOLLOW` stops a _pre-planted_ symlink and a _final-component_
 symlink, but not this intermediate-component race.
 
 The engine closes it by anchoring every privileged step on a file descriptor
 for the duplicate's parent directory. The parent fd is acquired with
-`O_NOFOLLOW_ANY` (macOS 11+), which fails if *any* path component is a
+`O_NOFOLLOW_ANY` (macOS 11+), which fails if _any_ path component is a
 symlink - not just `O_NOFOLLOW`, which guards only the final one and would let
 an attacker who owns an ancestor swap an intermediate component to redirect the
 open. (Firmlinks such as `/Users` are not symlinks, so they still resolve.) The
@@ -91,7 +91,7 @@ clone (`clonefileat`), the content re-verify and metadata copy (`openat` +
 names against that fd - the real directory inode - so swapping a path component
 after the fd is open cannot redirect any of them either. The clone itself uses
 `clonefileat` with `CLONE_NOFOLLOW_ANY`, which refuses a symlink in any
-component of the source *or* destination path; that also closes the source
+component of the source _or_ destination path; that also closes the source
 side, where the canonical is still referenced by absolute path. Without it, a
 local user who owns an ancestor of the canonical could race in an intermediate
 symlink to redirect the read onto an arbitrary same-volume file and have its
@@ -100,8 +100,8 @@ of defense.
 
 The fd-relative calls take a bare directory-relative component, while the clone
 source and every diagnostic take a path that resolves on its own. The engine
-brands these as distinct types (`Basename` vs `FullPath`) so `pyright --strict`
-(run in CI) rejects passing - or logging - one where the other belongs, keeping
+brands these as distinct types (`Basename` vs `FullPath`) so strict mypy and pyright
+(run in CI) reject passing - or logging - one where the other belongs, keeping
 that safety-relevant distinction from silently drifting.
 
 `CLONE_NOFOLLOW_ANY` is also the binding OS-version floor. Apple's
@@ -121,8 +121,8 @@ ranges under lock before sharing them, so a dedup can never merge mismatched dat
 macOS has no such ioctl; `clonefile` shares whatever the canonical holds at clone
 time. If a file changed between fclones' scan and our apply (a TOCTOU), blindly
 cloning would destroy the changed bytes. So in `--apply` mode we clone canonical
-into a temp first - a frozen copy-on-write snapshot - then re-compare *that
-snapshot* against `dup`'s current bytes immediately before the atomic swap
+into a temp first - a frozen copy-on-write snapshot - then re-compare _that
+snapshot_ against `dup`'s current bytes immediately before the atomic swap
 every time. Cloning first means a write to canonical after the snapshot cannot
 change what we install; comparing right before the swap closes the scan-to-apply
 window, which is seconds to minutes on a large run. That compare cannot be the
@@ -156,12 +156,12 @@ Anyone still able to write it already holds it, and those holders are visible to
 `libproc`, so a scan taken after the swap cannot go stale. Each pending swap settles
 against one scan:
 
-| Original | Path | Action |
-|---|---|---|
-| Unchanged, no writer, bytes match | Still the clone | Delete the original: success |
-| Written, held, or unverifiable | Still the clone | Swap back |
-| Unchanged, no writer | Written since the swap | Delete the original: the new write stands |
-| Written, held, or unverifiable | Written since the swap | Keep both and warn |
+| Original                          | Path                   | Action                                    |
+| --------------------------------- | ---------------------- | ----------------------------------------- |
+| Unchanged, no writer, bytes match | Still the clone        | Delete the original: success              |
+| Written, held, or unverifiable    | Still the clone        | Swap back                                 |
+| Unchanged, no writer              | Written since the swap | Delete the original: the new write stands |
+| Written, held, or unverifiable    | Written since the swap | Keep both and warn                        |
 
 The byte compare runs because a write through a mapping reaches `mtime` late, so ids
 alone can miss it. A run never deletes a file it has not verified.
@@ -235,20 +235,20 @@ engine detects this and leaves them alone, in `--apply` and dry-run alike.
 The check walks each file's **full extent map** - `fcntl(F_LOG2PHYS_EXT)` from byte 0
 to EOF - and trusts a match **only when the canonical and the duplicate have identical
 maps on the same device**. Then every data extent sits at the same physical device
-offset, which is *proof* the two reference the same blocks (a clone), never a
+offset, which is _proof_ the two reference the same blocks (a clone), never a
 coincidence, because a physical block belongs to exactly one allocation; and any holes
 line up. The compared identity carries the device id, since an offset is meaningful only
 within its device: the wrapper's `--one-fs` already keeps a group on one volume, but the
 engine runs on arbitrary `fclones` JSON, so it reconfirms rather than assumes.
 
-A *partial* match is never enough, and the full-map walk is what rejects it: a clone
+A _partial_ match is never enough, and the full-map walk is what rejects it: a clone
 whose later range was CoW-broken by an identical-bytes rewrite still shares its first
 extent and stays byte-identical (so `fclones` still groups it), yet its rewritten extent
 now sits at a different device offset - so its map differs from the canonical's and it is
 cloned normally, re-sharing the diverged range. The error is one-directional and safe:
-the check only ever *fails to prove* sharing (a missed reclaim - the file is cloned,
+the check only ever _fails to prove_ sharing (a missed reclaim - the file is cloned,
 never corrupted); it never asserts sharing that isn't there. A fragmented or sparse
-clone, by contrast, has the *same* map as its source and is correctly recognized, so a
+clone, by contrast, has the _same_ map as its source and is correctly recognized, so a
 re-run reclaims nothing on it instead of re-cloning it and re-counting its size - which
 is why re-running over an already-deduped tree is cheap whatever the file sizes.
 
@@ -261,9 +261,10 @@ the cloud - opens read-only, and falls back to "clone normally" on any error.
 
 The space the recognized clones represent is reported on its own line -
 `already saved by earlier clones: <allocated> allocated (<logical> logical) across <n> files`
+
 - so a run shows both what it reclaimed this time and what earlier runs already
-saved, recomputed from the filesystem each scan rather than tracked in any state
-file.
+  saved, recomputed from the filesystem each scan rather than tracked in any state
+  file.
 
 ## Reclaim accounting
 
@@ -285,7 +286,7 @@ still reflects the duplicate byte payload represented by those paths.
 
 Freeing a duplicate's blocks only returns them to the container's free space once
 nothing else references them. An APFS **snapshot** - notably Time Machine's hourly
-*local* snapshots - is copy-on-write and pins the blocks it captured, so blocks freed
+_local_ snapshots - is copy-on-write and pins the blocks it captured, so blocks freed
 by a dedup run that a snapshot still references are retained for the snapshot rather
 than returned. The allocated reclaim the tool reports is the best filesystem estimate
 of freed duplicate blocks, but `df` lags until the snapshots holding the pre-dedup
@@ -307,8 +308,8 @@ README ("Why didn't free space change? Snapshots") for the operator-facing steps
 - **`--one-fs`.** Never group across volumes; `cp -c`/`clonefile` would otherwise
   silently fall back to a full copy with no error and no saving.
 - **Excludes cloud-backed roots by default.** iCloud Drive (`~/Library/Mobile
-  Documents`), third-party File Providers (`~/Library/CloudStorage`), and Photos
-  libraries (`*.photoslibrary`) can hold *dataless* files - evicted to the cloud,
+Documents`), third-party File Providers (`~/Library/CloudStorage`), and Photos
+  libraries (`*.photoslibrary`) can hold _dataless_ files - evicted to the cloud,
   reporting their full size but holding no local bytes. `fclones` hashes by
   reading, and reading a dataless file faults it back down from the cloud, so
   scanning these roots could silently re-download gigabytes of deliberately-evicted
@@ -318,7 +319,7 @@ README ("Why didn't free space change? Snapshots") for the operator-facing steps
   download happens at scan time, so a scan-level exclude - not merely an apply-time
   skip - is what actually prevents it.
 - **Excludes protected and machine-managed `~/Library` data by default.** Two
-  classes, same rationale - TCC-protected *and* poor dedup targets, re-included
+  classes, same rationale - TCC-protected _and_ poor dedup targets, re-included
   with `--include-app-data`. App-private stores (Mail, Messages, Safari, the
   per-app sandbox `Containers`/`Group Containers`) are live databases that churn,
   holding little duplicate data and much that is sensitive. OS-managed data
@@ -330,7 +331,7 @@ README ("Why didn't free space change? Snapshots") for the operator-facing steps
   `Daemon Containers`) is machine-generated, constantly rewritten, and worth
   nothing deduped. Scanning either makes macOS prompt on an interactive run
   or deny access (`Operation not permitted`) on the scheduled job; the denial lands
-  at `fclones`' scan (a denied folder never enters the report), so the *wrapper* -
+  at `fclones`' scan (a denied folder never enters the report), so the _wrapper_ -
   not the engine - folds those scan-time denials into one counted note rather than
   a per-folder warning (see "Skips are summarized by reason" below). The list is
   best-effort noise reduction for the largest such trees, not exhaustive - a missed
@@ -346,7 +347,7 @@ README ("Why didn't free space change? Snapshots") for the operator-facing steps
   terminal it runs from, so granting Terminal/iTerm Full Disk Access lets a
   hands-on `apfs-dedupe` reach those folders. The scheduled `LaunchDaemon` cannot:
   it runs via `/bin/sh`, so the only binary to grant would be the system shell -
-  Full Disk Access for *every* shell script, which the tool will not recommend -
+  Full Disk Access for _every_ shell script, which the tool will not recommend -
   and a background job receives no TCC prompt regardless. So the division of labor
   is: the daemon covers everything outside the TCC-protected user folders, and a
   periodic interactive run from an FDA-granted terminal covers those. (Granting a
@@ -361,7 +362,7 @@ README ("Why didn't free space change? Snapshots") for the operator-facing steps
   per-folder permission denials (matched by the OS `strerror` text, stable across
   `fclones` versions) into one counted note, passing `fclones`' own progress and
   any non-permission warning straight through. At **apply/examine** time, the
-  engine classifies each skip on a file that *did* enter the report (permission,
+  engine classifies each skip on a file that _did_ enter the report (permission,
   symlinked component, hard-linked, changed-since-scan, cloud-evicted, unreadable)
   and prints a counted breakdown at the end of the summary. Both advise on the one
   reason a user can act on: granting Full Disk Access. `--verbose` restores the raw
@@ -392,8 +393,8 @@ README ("Why didn't free space change? Snapshots") for the operator-facing steps
   for those files (a 1-byte and a 4096-byte allocated file each save exactly one
   block; `4096`/`4097` are not principled floors). Sparse or compressed files can
   occupy fewer blocks than their logical size, which is why the report separates
-  allocated and logical bytes. The 1 MiB default is therefore not about *where*
-  savings are - it bounds *work* (files scanned and
+  allocated and logical bytes. The 1 MiB default is therefore not about _where_
+  savings are - it bounds _work_ (files scanned and
   cloned) for the common case, where chasing the long tail of tiny files costs more
   inode churn than it returns. A git- or CI-heavy machine inverts that: its savings
   concentrate in a large number of small, content-addressed files (git loose
@@ -402,7 +403,7 @@ README ("Why didn't free space change? Snapshots") for the operator-facing steps
   them, trading a much larger scan-and-clone count for that reclaim. An explicit
   `--min` always overrides the preset.
 - **Whole-`/Users`, across users, in one pass - the intended default.** It is
-  safe because the apply restores each *replaced* file's own owner/mode/ACL and
+  safe because the apply restores each _replaced_ file's own owner/mode/ACL and
   never modifies the canonical, so every file keeps its identity and only physical
   extents are shared. Copy-on-write means a later write diverges rather than
   corrupting a twin; grouped files are byte-identical already, so shared storage
@@ -423,8 +424,8 @@ where they can't.** `apfs-dedupe` already delegates detection to `fclones` and
 scheduling to launchd rather than reimplement either; log rotation is the same
 call. A scheduled run (see `install-daily.sh`) has launchd redirect the job's
 stdout and stderr to a single append-only log. The earlier phases that cut
-*per-run* volume - skipping already-cloned files, summarizing instead of streaming
-a line per file - do not bound the *total*: a once-a-day append still grows without
+_per-run_ volume - skipping already-cloned files, summarizing instead of streaming
+a line per file - do not bound the _total_: a once-a-day append still grows without
 limit. The two install modes bound it differently, because the trusted primitive
 reaches one and not the other.
 
@@ -437,7 +438,7 @@ rotated archive `root:wheel 0600`, matching the live log (which names paths unde
 every user's home), so compression never widens read access. Rotation is
 size-triggered (1 MiB, keep 7 gzipped), not time-triggered, so a near-empty log is
 never churned on a clock. `newsyslog` rotates by renaming the log aside and
-starting a fresh one - safe here precisely because the daemon is a *periodic* job:
+starting a fresh one - safe here precisely because the daemon is a _periodic_ job:
 launchd opens the log only for the seconds the daily run takes and closes it on
 exit, so `newsyslog` (waking every ~30 min) almost always rotates while no fd is
 open, and the next run's launchd open lands on the fresh file.
@@ -450,7 +451,7 @@ bound the log" is a worse contract - the safe outcome must not be opt-in), the
 agent caps its own log. When launchd sets `APFS_DEDUPE_LOGFILE` in the agent plist,
 the run, at startup, gzips the log aside and **truncates it in place** if it is over
 the cap (`rotate_log`, 1 MiB, keep 3). Truncating in place matters here in a way it
-does not for the daemon: the agent rotates its *own* log at the very moment launchd
+does not for the daemon: the agent rotates its _own_ log at the very moment launchd
 is holding that file open as the run's stdout, so a rename would divert the rest of
 this run's output into the archive and lose it until the next launch - truncating
 keeps that open fd writing to the live inode (`O_APPEND` resumes from offset zero).
@@ -481,7 +482,7 @@ not the unattended sweep the gate governs.
 Deferral is cheap because the apply is idempotent: the next run re-scans, skips
 everything already cloned (see "Skipping files already cloned on an earlier run"),
 and reclaims only what has accumulated since - so a skipped night costs a day's
-delay on a non-urgent cleanup, nothing more. Only the run's *start* is gated; a
+delay on a non-urgent cleanup, nothing more. Only the run's _start_ is gated; a
 sweep already in progress when AC is lost runs to completion.
 
 ## Out of scope (for now)

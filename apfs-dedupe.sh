@@ -106,21 +106,72 @@ argc=$#
 while [ "$argc" -gt 0 ]; do
     argc=$((argc - 1))
     case "$1" in
-        --apply) APPLY=1; shift ;;
-        --allow-root) ALLOW_ROOT=1; shift ;;
-        --include-cloud) INCLUDE_CLOUD=1; shift ;;
-        --include-app-data) INCLUDE_APP_DATA=1; shift ;;
-        --git) GIT_PRESET=1; shift ;;
-        --verbose) VERBOSE=1; shift ;;
-        --require-ac) REQUIRE_AC=1; shift ;;
-        --min) MIN="${2:?--min needs a SIZE}"; MIN_SET=1; shift 2; argc=$((argc - 1)) ;;
-        --min=*) MIN="${1#--min=}"; MIN_SET=1; shift ;;
-        --scope) SCOPE="${2:?--scope needs a PATH}"; shift 2; argc=$((argc - 1)) ;;
-        --scope=*) SCOPE="${1#--scope=}"; shift ;;
-        --exclude) set -- "$@" --exclude "${2:?--exclude needs a GLOB}"; shift 2; argc=$((argc - 1)) ;;
-        --exclude=*) set -- "$@" --exclude "${1#--exclude=}"; shift ;;
-        -h|--help) usage; exit 0 ;;
-        *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+        --apply)
+            APPLY=1
+            shift
+            ;;
+        --allow-root)
+            ALLOW_ROOT=1
+            shift
+            ;;
+        --include-cloud)
+            INCLUDE_CLOUD=1
+            shift
+            ;;
+        --include-app-data)
+            INCLUDE_APP_DATA=1
+            shift
+            ;;
+        --git)
+            GIT_PRESET=1
+            shift
+            ;;
+        --verbose)
+            VERBOSE=1
+            shift
+            ;;
+        --require-ac)
+            REQUIRE_AC=1
+            shift
+            ;;
+        --min)
+            MIN="${2:?--min needs a SIZE}"
+            MIN_SET=1
+            shift 2
+            argc=$((argc - 1))
+            ;;
+        --min=*)
+            MIN="${1#--min=}"
+            MIN_SET=1
+            shift
+            ;;
+        --scope)
+            SCOPE="${2:?--scope needs a PATH}"
+            shift 2
+            argc=$((argc - 1))
+            ;;
+        --scope=*)
+            SCOPE="${1#--scope=}"
+            shift
+            ;;
+        --exclude)
+            set -- "$@" --exclude "${2:?--exclude needs a GLOB}"
+            shift 2
+            argc=$((argc - 1))
+            ;;
+        --exclude=*)
+            set -- "$@" --exclude "${1#--exclude=}"
+            shift
+            ;;
+        -h | --help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "unknown option: $1" >&2
+            usage >&2
+            exit 2
+            ;;
     esac
 done
 
@@ -134,7 +185,10 @@ if [ -n "$GIT_PRESET" ] && [ -z "$MIN_SET" ]; then
     MIN=1
 fi
 
-[ "$(uname -s)" = "Darwin" ] || { echo "error: macOS only (uses APFS clonefile)." >&2; exit 1; }
+[ "$(uname -s)" = "Darwin" ] || {
+    echo "error: macOS only (uses APFS clonefile)." >&2
+    exit 1
+}
 
 # Scheduled/unattended runs pass --require-ac: skip entirely when not on AC power.
 # This is a best-effort "reclaim yesterday's duplicates" sweep, not critical work,
@@ -167,8 +221,8 @@ fi
 # without a clock) and to avoid rotating a near-empty log on a schedule.
 # Best-effort: a rotation failure warns and continues -- it must never abort the
 # sweep. The --system daemon does NOT set this variable. See docs/architecture.md.
-APFS_DEDUPE_LOG_MAX_BYTES=1048576   # 1 MiB
-APFS_DEDUPE_LOG_KEEP=3              # compressed generations to retain
+APFS_DEDUPE_LOG_MAX_BYTES=1048576 # 1 MiB
+APFS_DEDUPE_LOG_KEEP=3            # compressed generations to retain
 rotate_log() {
     _log=$1
     [ -f "$_log" ] || return 0
@@ -230,19 +284,42 @@ fi
 # Apple's system files cannot be modified regardless; but the writable
 # data-volume root would sweep /Library, /Applications, etc. -- not the point.
 RAW_SCOPE="$SCOPE"
-SCOPE=$(unset CDPATH; cd -- "$RAW_SCOPE" 2>/dev/null && pwd -P) \
-    || { echo "error: scope not found: $RAW_SCOPE" >&2; exit 1; }
+SCOPE=$(
+    unset CDPATH
+    cd -- "$RAW_SCOPE" 2>/dev/null && pwd -P
+) \
+    || {
+        echo "error: scope not found: $RAW_SCOPE" >&2
+        exit 1
+    }
 if [ -z "$ALLOW_ROOT" ]; then
     case "$SCOPE" in
         / | /System | /System/Volumes/Data)
             echo "error: refusing to dedupe '$SCOPE' -- that sweeps system/Apple areas." >&2
             echo "       Use /Users (the default) or a subdirectory; pass --allow-root to override." >&2
-            exit 1 ;;
+            exit 1
+            ;;
     esac
 fi
 
-command -v fclones >/dev/null 2>&1 || { echo "error: fclones not found -- install with: brew install fclones" >&2; exit 1; }
-command -v python3 >/dev/null 2>&1 || { echo "error: python3 not found (install the Xcode Command Line Tools)." >&2; exit 1; }
+command -v fclones >/dev/null 2>&1 || {
+    echo "error: fclones not found -- install with: brew install fclones" >&2
+    exit 1
+}
+# The engine needs Python 3.12 or newer. A scheduled job names the interpreter
+# install-daily.sh found in APFS_DEDUPE_PYTHON, since launchd starts it with a
+# PATH of its own; a run from a shell takes python3 from PATH.
+PYTHON=${APFS_DEDUPE_PYTHON:-python3}
+command -v "$PYTHON" >/dev/null 2>&1 || {
+    echo "error: $PYTHON not found -- apfs-dedupe needs Python 3.12 or newer (for example: brew install python)." >&2
+    exit 1
+}
+"$PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 12))' 2>/dev/null || {
+    echo "error: $(command -v "$PYTHON") is older than Python 3.12, which apfs-dedupe needs." >&2
+    echo "       Put a newer python3 first on PATH (for example: brew install python); for a" >&2
+    echo "       scheduled run, then re-run install-daily.sh so the job records it." >&2
+    exit 1
+}
 
 # Reading other users' files under /Users requires root; without it fclones
 # silently skips what it cannot read, undercounting savings.
@@ -250,7 +327,10 @@ if [ "$(id -u)" -ne 0 ] && [ "$SCOPE" = "/Users" ]; then
     echo "note: not running as root; files you cannot read will be skipped. Use sudo for /Users." >&2
 fi
 
-HERE=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
+HERE=$(
+    unset CDPATH
+    cd -- "$(dirname -- "$0")" && pwd
+)
 APPLY_ENGINE="$HERE/lib/apply.py"
 
 # Clones and displaced files wait here, outside the trees being deduped; see
@@ -260,7 +340,11 @@ WORK_DIR="$SCOPE/.apfsdedupe-work"
 
 REPORT=$(mktemp)
 FCERR=$(mktemp)
-trap 'rm -f "$REPORT" "$FCERR"' EXIT INT TERM
+# After a set -u abort, macOS /bin/sh enters an EXIT trap with a stale $?, so
+# a run that stopped short would exit 0; RUN_COMPLETE tells the trap it did not.
+RUN_COMPLETE=0
+# shellcheck disable=SC2154  # the trap body assigns _trap_rc before it reads it
+trap '_trap_rc=$?; [ "$RUN_COMPLETE" = 1 ] || [ "$_trap_rc" -ne 0 ] || _trap_rc=1; rm -f "$REPORT" "$FCERR"; exit "$_trap_rc"' EXIT INT TERM
 
 # Cloud-backed files (iCloud Drive, third-party File Providers, Photos library
 # originals) can be "dataless" -- evicted to the cloud, holding no local bytes.
@@ -356,7 +440,7 @@ rc=0
 scan_start=$(date +%s)
 fclones group --no-ignore --hidden --one-fs --min "$MIN" "$@" \
     --format json "$SCOPE" >"$REPORT" 2>"$FCERR" || rc=$?
-scan_secs=$(( $(date +%s) - scan_start ))
+scan_secs=$(($(date +%s) - scan_start))
 
 # Match the OS strerror text, not fclones' surrounding wording: the errno string
 # is stable across fclones versions. It is English here because launchd jobs run
@@ -414,7 +498,7 @@ set --
 [ -n "$VERBOSE" ] && set -- "$@" --verbose
 set -- "$@" --scan-seconds "$scan_secs"
 [ -n "$files_scanned" ] && set -- "$@" --files-scanned "$files_scanned"
-python3 "$APPLY_ENGINE" "$@" <"$REPORT"
+"$PYTHON" "$APPLY_ENGINE" "$@" <"$REPORT"
 
 # After an --apply, APFS/Time Machine *local* snapshots (taken hourly) are
 # copy-on-write and pin the blocks they captured, so blocks just freed can stay
@@ -432,3 +516,4 @@ if [ -n "$APPLY" ] && tmutil listlocalsnapshots / 2>/dev/null | grep -q 'com\.ap
     echo "        sudo tmutil thinlocalsnapshots /System/Volumes/Data 21474836480 4" >&2
     echo "      See the README section \"Why didn't free space change? Snapshots\"." >&2
 fi
+RUN_COMPLETE=1
