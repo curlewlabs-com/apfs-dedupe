@@ -17,7 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -182,6 +182,9 @@ def test_read_ahead_is_bounded() -> None:
     check(
         "read-ahead: stops at the queue bound", pulled == limit, f"{pulled} != {limit}"
     )
+    # Closing the stream is what shuts its worker pool down; the engine
+    # declares only an Iterator, so the generator it returns is narrowed here.
+    assert isinstance(stream, Generator)
     stream.close()
 
 

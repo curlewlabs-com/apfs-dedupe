@@ -1,9 +1,9 @@
 name: CI
 
 # Gate every PR (and post-merge main) on the checks a contributor runs locally:
-# strict mypy and pyright on Linux, and the real-clonefile integration test on
-# macOS, plus the checks every Curlew Labs repository shares. See README
-# "Development".
+# strict mypy on Linux, and the real-clonefile integration test on macOS, plus
+# the checks every Curlew Labs repository shares, strict pyright among them. See
+# README "Development".
 on:
   push:
     branches: [main]
@@ -32,13 +32,6 @@ jobs:
         run: python -m pip install -r requirements-dev.txt
       - name: mypy (strict)
         run: mypy
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          # renovate: datasource=node-version depName=node
-          node-version: 24.22.2
-      - name: pyright (strict)
-        # renovate: datasource=npm depName=pyright
-        run: npx --yes pyright@1.1.414
 
   test:
     # The apply uses CLONE_NOFOLLOW_ANY, which Apple's headers do not define
@@ -85,7 +78,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: curlewlabs-com/ci-baseline@f05f17a38ba2dfbaf0cde130a375b346e9a923a2 # v0.2.0
+      - uses: curlewlabs-com/ci-baseline@e0c1822299b1d02e8897aa6e87b70a12728934bf # v0.3.2
 
   conclusion:
     # The one check branch protection requires, so adding or renaming a job
