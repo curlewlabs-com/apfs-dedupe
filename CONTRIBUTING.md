@@ -28,8 +28,9 @@ shellcheck, shfmt, ruff, prettier and strict pyright, under this repository's `p
 and `.editorconfig`.
 
 `test/test.sh` also runs `test/test_concurrent_writers.py`, which races the apply
-against real writers, and `test/test_inspect.py`, which covers the threaded
-inspection. The integration test needs **macOS 15+** (it exercises real `clonefile` /
+against real writers, `test/test_inspect.py`, which covers the threaded
+inspection, and `test/test_prefilter.py`, which covers the clone-id prefilter.
+The integration test needs **macOS 15+** (it exercises real `clonefile` /
 `CLONE_NOFOLLOW_ANY`), `fclones` on `PATH` (`brew install fclones`), and Python
 3.12 or newer as `python3` (`brew install python`). The type checks run
 anywhere.
