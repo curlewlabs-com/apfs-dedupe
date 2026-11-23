@@ -1248,6 +1248,35 @@ case "$out" in
 esac
 assert_eq "prefilter: an excluded clone is untouched" "$(ino "$d3/ex/b")" "$ib"
 
+# An --exclude in syntax the prefilter does not read the way fclones does (an
+# extended group here) is not left to its guess: the whole run is the plain walk,
+# where fclones applies the pattern. first is an independent copy and the group's
+# canonical, so a withheld ex/b would be swapped for a clone of it.
+d6="$WORK/prefilter-extglob"
+mkdir -p "$d6/keep" "$d6/ex"
+head -c 65536 /dev/urandom >"$d6/first"
+cp "$d6/first" "$d6/keep/a"
+cp -c "$d6/keep/a" "$d6/ex/b"
+ib=$(ino "$d6/ex/b")
+PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d6" --min 1 --exclude '**/@(ex|other)/**' --apply >/dev/null 2>&1
+if grep -qxF -- '--stdin' "$d/argv"; then fail "prefilter: an exclude it cannot read still fed fclones a list"; else pass "prefilter: an exclude it cannot read is left to the plain fclones walk"; fi
+assert_eq "prefilter: a clone excluded by an extended group is untouched" "$(ino "$d6/ex/b")" "$ib"
+
+# fclones lists a group by path and the apply clones from the first file listed.
+# sub/old is the set's oldest file and sorts last, so offering it would make
+# plain the canonical and re-clone both existing clones. The plan has to be the
+# one a full hash gives, line for line.
+d7="$WORK/prefilter-order"
+mkdir -p "$d7/sub"
+head -c 65536 /dev/urandom >"$d7/sub/old"
+cp -c "$d7/sub/old" "$d7/a"
+cp "$d7/sub/old" "$d7/plain"
+out=$(PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d7" --min 1 2>/dev/null)
+plain_out=$(PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d7" --min 1 --no-prefilter 2>/dev/null)
+assert_eq "prefilter: the canonical is the one a full hash picks" \
+    "$(printf '%s\n' "$out" | grep -E '^(would clone|already saved|would reclaim)')" \
+    "$(printf '%s\n' "$plain_out" | grep -E '^(would clone|already saved|would reclaim)')"
+
 # ---- fclones' hash cache is on by default, and --no-cache turns it off ----
 d4="$WORK/cache"
 mkdir -p "$d4/scope"

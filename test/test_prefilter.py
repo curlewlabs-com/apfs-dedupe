@@ -242,9 +242,27 @@ def test_walk(root: Path) -> None:
         str(sorted(reach ^ (all_files(d) - withheld))),
     )
     check("walk: the set's first file is offered", bool(sets) and sets[0][0] in reach)
+    # fclones lists a group by path, a shallower path first, and the apply clones
+    # from the first file listed. This set's oldest file is its deepest, so
+    # offering by age would hand the group a canonical a full hash would not.
+    order = root / "order"
+    (order / "sub").mkdir(parents=True)
+    (order / "sub" / "old").write_bytes(body + b"o")
+    clone(order / "sub" / "old", order / "b")
+    clone(order / "sub" / "old", order / "a")
+    listed = json.loads(
+        subprocess.run(
+            ["fclones", "group", "--no-ignore", "--hidden", "--min", "1"]
+            + ["--format", "json", str(order)],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    )["groups"][0]["files"]
     check(
-        "walk: the file offered is the set's lowest inode, as fclones orders a group",
-        bool(sets) and sets[0][0] == min(members, key=lambda p: os.lstat(p).st_ino),
+        "walk: a set is offered and kept in the order fclones lists a group",
+        walk(order)[1] == [listed],
+        f"{walk(order)[1]} against {listed}",
     )
     check(
         "walk: a subtree holding nothing withheld is offered as one directory",
@@ -431,6 +449,47 @@ def test_excludes_against_fclones(root: Path) -> None:
             ]
         ),
     )
+    # fclones also reads extended groups and nested braces, which the chunk
+    # reading takes for literal text. Each must be refused, sending the run to the
+    # plain walk, unless the superset has since been taught to hold for it.
+    for glob in (
+        "**/@(target|brace)/**",
+        "**/+(target|brace)/**",
+        "**/?(a)target/**",
+        "**/{target,{brace,q}}/**",
+    ):
+        dropped = {str(p) for p in paths} - fclones_kept(d, paths, [glob])
+        chunks = prefilter._MightExclude([glob])  # pyright: ignore[reportPrivateUsage]
+        missed = sorted(p for p in dropped if not chunks.matches(p))
+        refused = prefilter.check(str(d), "1", [glob]) is not None
+        check(
+            f"globs: {glob} is refused, or flagged wherever fclones drops a path",
+            refused or not missed,
+            str(missed),
+        )
+
+
+def test_check(root: Path) -> None:
+    """What the prefilter declines to run on, leaving the scan to the plain walk."""
+    d = root / "check"
+    d.mkdir()
+    read = ["**/target/**", "plain/*", "**/\\[x\\]/**", "**/brace/a{b,c}/**"]
+    check(
+        "check: a plain scope and the excludes it reads are accepted",
+        prefilter.check(str(d), "1", read) is None,
+    )
+    check(
+        "check: an unreadable --min is refused",
+        prefilter.check(str(d), "1Q", []) is not None,
+    )
+    # A scope holding a newline would reach fclones' stdin as two paths, and the
+    # second could name a tree outside the scope.
+    odd = root / "check\nscope"
+    odd.mkdir()
+    check(
+        "check: a scope a line of stdin cannot carry is refused",
+        prefilter.check(str(odd), "1", []) is not None,
+    )
 
 
 def test_min() -> None:
@@ -476,6 +535,7 @@ def main() -> int:
         test_decoding(root)
         test_walk(root)
         test_excludes_against_fclones(root)
+        test_check(root)
         test_min()
         test_merge()
     finally:

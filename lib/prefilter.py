@@ -582,20 +582,45 @@ class Walk:
         self.listed[d] = _Listed(offer, subdirs)
         return to_list
 
+    @staticmethod
+    def _fclones_order(path: str) -> tuple[int, list[str]]:
+        """Where fclones lists a path within a group. Its Path orders by parent
+        before name, so a shallower path sorts first and paths of one depth compare
+        component by component."""
+        parts = path.split("/")
+        return len(parts), parts
+
     def sets(self) -> Iterator[tuple[int, list[str]]]:
-        """(size, files) for each withheld set; files[0] went to fclones. That is
-        the set's lowest inode: fclones orders a group by inode and the apply
-        clones from the first, so the group keeps the canonical it would have had
-        with every file hashed, and the plan does not depend on the prefilter."""
+        """(size, files) for each withheld set, in the order fclones lists a group;
+        files[0] went to fclones. The apply clones from the first file of a group,
+        so offering the member fclones would list first keeps the canonical the
+        group would have had with every file hashed, and the plan does not depend
+        on the prefilter."""
         for (_dev, _cid, size), files in self.clones.items():
             if len(files) >= 2:
-                yield size, [p for _ino, p in sorted(files)]
+                yield size, sorted((p for _ino, p in files), key=self._fclones_order)
 
 
-def check(scope: str, min_text: str) -> str | None:
+# Glob syntax fclones accepts and _literal_chunks does not read as it does: an
+# extended group, @(a|b) and its ?, *, + and ! forms, whose alternatives would be
+# taken for literal text, and a brace group holding a brace, a set or an escape,
+# which the search for the first '}' cuts short. Either leaves a chunk no excluded
+# path need contain, so a file fclones excludes could be withheld and reach the
+# apply. check() refuses these rather than widen the reading.
+_UNREAD_GLOB = re.compile(r"[?*+@!]\(|\{[^}]*[{\[\\]")
+
+
+def check(scope: str, min_text: str, excludes: Sequence[str]) -> str | None:
     """Why the prefilter cannot run here, or None if it can."""
     if parse_min(min_text) is None:
         return f"cannot read --min {min_text!r}"
+    for glob in excludes:
+        if _UNREAD_GLOB.search(glob):
+            return f"cannot read --exclude {glob!r} the way fclones does"
+    # Every path offered to fclones starts with the scope, so a scope a line of
+    # stdin cannot carry would arrive as other paths, some outside it.
+    if _describable(os.fsencode(scope)) is None:
+        return f"cannot give fclones the scope {scope!r} on stdin"
     try:
         list_dir(scope)
     except OSError as e:
@@ -621,7 +646,7 @@ def main(argv: Sequence[str] | None = None, stdout: IO[str] = sys.stdout) -> int
         help="threads listing directories (default: one per efficiency core)",
     )
     args = p.parse_args(argv)
-    reason = check(args.scope, args.min)
+    reason = check(args.scope, args.min, args.exclude)
     if reason is not None:
         print(f"prefilter: {reason}; hashing every file", file=sys.stderr)
         return FALLBACK

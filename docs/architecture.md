@@ -323,7 +323,12 @@ it reads `--exclude` itself are deliberately one-sided, so a difference from
 `**/a/b/**` with literal or `*`/`?` segments, read narrowly, so it never skips a
 directory `fclones` would walk. It withholds a file only if no pattern's literal
 text appears in its path in order, a test that is wider than any reading of the
-glob and its anchoring. Both are checked against `fclones` itself in the tests.
+glob and its anchoring. That holds for the syntax it reads: literal text, `*`,
+`?`, `**`, a character set, an escape, and one level of braces. `fclones` also
+accepts extended groups (`@(a|b)` and its `?`, `*`, `+` and `!` forms) and nested
+braces, and an `--exclude` using either turns the prefilter off for the run rather
+than risk withholding a file the pattern excludes. Both readings are checked
+against `fclones` itself in the tests.
 On `--stdin` input `fclones` also drops a file whose path plus `/` an exclude ending
 in `**` matches, so a file named, say, `target` under `--exclude '**/target/**'`
 is left out of the scan; that only skips a file.
@@ -340,8 +345,9 @@ What the prefilter cannot list or describe it hands to `fclones` as a directory,
 which `fclones` walks itself as before: a directory it cannot open (so the
 permission note is unchanged), one holding a name a line of `--stdin` cannot carry
 (a newline or carriage return, or a name that is not UTF-8), and a dataless one.
-If it cannot run at all (status 3: an unreadable `--min` or scope) or fails, the
-scan is the plain `fclones` walk.
+If it cannot run at all (status 3: an unreadable `--min` or scope, an `--exclude`
+in syntax it does not read, or a scope whose own path a line of `--stdin` cannot
+carry) or fails, the scan is the plain `fclones` walk.
 
 The listing runs on the apply's thread count (one per efficiency core), since it
 waits on the disk. What it saves is the reading of every withheld file.
