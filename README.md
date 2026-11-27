@@ -127,6 +127,12 @@ files can't be modified in any case (they would simply error and be skipped).
   saved (`already saved by earlier clones: ...`). Re-running is cheap and changes
   nothing once a tree is deduped - see
   [docs/architecture.md](docs/architecture.md).
+- **Does not re-read clones on a re-run.** Before hashing, the scope is listed and
+  files that already share one APFS data stream with an identical file (the clone
+  id, read from metadata alone) are not given to `fclones`; one file of each set
+  is, and the rest rejoin its group for the apply's usual checks. `fclones` also
+  keeps a hash cache, so an unchanged file is not read twice. See
+  [docs/architecture.md](docs/architecture.md#re-runs-hashing-only-what-changed).
 - **Won't re-download cloud files.** iCloud Drive, third-party File Provider, and
   Photos library roots are excluded from the scan by default: reading an evicted
   (dataless) file would fault it back down from the cloud - the opposite of
@@ -200,6 +206,7 @@ Dry-run uses none of that and works on any macOS version.
 
 ```
 apfs-dedupe.sh [--apply] [--scope PATH] [--min SIZE] [--exclude GLOB] [--verbose]
+               [--no-cache] [--no-prefilter]
 ```
 
 - `--scope PATH` - narrow the scan if you want (default `/Users`, which covers
@@ -238,6 +245,14 @@ apfs-dedupe.sh [--apply] [--scope PATH] [--min SIZE] [--exclude GLOB] [--verbose
   reason (see [Output](#output)); `--verbose` restores the per-file `cloned` line on
   stdout, adds a per-file skip line on stderr, and surfaces the raw `fclones`
   diagnostics for the folders it couldn't read. A dry-run always prints its full plan.
+- `--no-cache` - do not use `fclones`' hash cache. By default `fclones` keeps the
+  hashes it computes in `~/Library/Caches/fclones` (`/var/root/Library/Caches/fclones`
+  when run as root), keyed by inode, size and mtime, so an unchanged file is not
+  read again on the next run. `fclones` never prunes it; delete the directory to
+  reclaim the space.
+- `--no-prefilter` - hash every file. By default the scope is listed first and
+  files that already share all their storage with an identical file are not hashed
+  (see "Does not re-read clones on a re-run" above).
 - `--require-ac` - skip the run (exit 0, changing nothing) if not on AC power. For
   unattended/scheduled use: a laptop on battery - e.g. during a power outage -
   defers this best-effort sweep to the next run on AC rather than draining the

@@ -1159,11 +1159,138 @@ else
     fail "require-ac: on AC the gate wrongly blocked the sweep"
 fi
 
+# ---- the prefilter: proven clones are not re-hashed, and nothing else changes ----
+# A re-run over a deduped tree used to hash every clone again. The wrapper now
+# lists the scope first (lib/prefilter.py) and offers fclones only one file of
+# each set that shares one data stream; the rest are added back to the report.
+# The recording stub below passes everything to the real fclones and keeps what
+# it was given on stdin, which is what proves a file was not hashed.
+REAL_FCLONES=$(command -v fclones)
+d="$WORK/prefilter"
+mkdir -p "$d/bin" "$d/scope/x"
+cat >"$d/bin/fclones" <<EOF
+#!/bin/sh
+for a in "\$@"; do printf '%s\n' "\$a"; done > "$d/argv"
+case " \$* " in
+    *" --stdin "*) tee "$d/stdin" | "$REAL_FCLONES" "\$@" ;;
+    *) : > "$d/stdin"; "$REAL_FCLONES" "\$@" ;;
+esac
+EOF
+chmod +x "$d/bin/fclones"
+s="$d/scope"
+head -c 65536 /dev/urandom >"$s/a"
+cp -c "$s/a" "$s/b"
+cp -c "$s/a" "$s/x/c"
+cp "$s/a" "$s/plain"
+ia=$(ino "$s/a")
+ib=$(ino "$s/b")
+ic=$(ino "$s/x/c")
+ip=$(ino "$s/plain")
+out=$(PATH="$d/bin:$PATH" "$SCRIPT" --scope "$s" --min 1 2>/dev/null)
+offered=$(grep -cxE "$s/(a|b|x/c)" "$d/stdin" || true)
+assert_eq "prefilter: one file of a clone set is offered to fclones" "$offered" "1"
+if grep -qxF "$s/plain" "$d/stdin"; then pass "prefilter: a plain copy is still hashed"; else fail "prefilter: a plain copy was not offered"; fi
+case "$out" in
+    *"would clone "*" -> $s/plain "*) pass "prefilter: the plain copy is planned against the set" ;;
+    *) fail "prefilter: plain copy not planned (got: $out)" ;;
+esac
+case "$out" in
+    *"already saved by earlier clones: "*" across 2 files"*) pass "prefilter: the withheld clones are reported as already saved" ;;
+    *) fail "prefilter: withheld clones not reported as saved (got: $out)" ;;
+esac
+case "$out" in
+    *"not re-hashed: 2 files"*) pass "prefilter: the summary says how many files were not re-hashed" ;;
+    *) fail "prefilter: no not-re-hashed line (got: $out)" ;;
+esac
+plain_out=$(PATH="$d/bin:$PATH" "$SCRIPT" --scope "$s" --min 1 --no-prefilter 2>/dev/null)
+if grep -qxF -- '--stdin' "$d/argv"; then fail "prefilter: --no-prefilter still fed fclones a list"; else pass "prefilter: --no-prefilter walks with fclones as before"; fi
+assert_eq "prefilter: the plan is the same without it" \
+    "$(printf '%s\n' "$out" | grep -E '^(would clone|already saved|would reclaim)' | sed 's/ -> .*//; s/^would clone .*/would clone/' | sort)" \
+    "$(printf '%s\n' "$plain_out" | grep -E '^(would clone|already saved|would reclaim)' | sed 's/ -> .*//; s/^would clone .*/would clone/' | sort)"
+PATH="$d/bin:$PATH" "$SCRIPT" --scope "$s" --min 1 --apply >/dev/null 2>&1
+if [ "$(ino "$s/plain")" != "$ip" ] && cmp -s "$s/a" "$s/plain"; then pass "prefilter: --apply clones the plain copy"; else fail "prefilter: --apply did not clone the plain copy"; fi
+assert_eq "prefilter: --apply leaves the existing clones alone" "$(ino "$s/a") $(ino "$s/b") $(ino "$s/x/c")" "$ia $ib $ic"
+
+# With nothing to hold back the scan is the plain fclones walk, exactly as before.
+d5="$WORK/prefilter-none"
+mkdir -p "$d5"
+head -c 4096 /dev/urandom >"$d5/a"
+cp "$d5/a" "$d5/b"
+PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d5" --min 1 >/dev/null 2>&1
+if grep -qxF -- '--stdin' "$d/argv"; then fail "prefilter: a scope with no clones was not the plain walk"; else pass "prefilter: a scope with no clones is the plain fclones walk"; fi
+
+# A clone that has since been written, even with the same bytes, has its own data
+# stream again, so it must be hashed, and re-cloned to share its blocks again.
+d2="$WORK/prefilter-diverged"
+mkdir -p "$d2"
+head -c 65536 /dev/urandom >"$d2/a"
+cp -c "$d2/a" "$d2/b"
+dd if="$d2/a" of="$d2/b" bs=4096 skip=3 seek=3 count=1 conv=notrunc 2>/dev/null
+out=$(PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d2" --min 1 2>/dev/null)
+if ! grep -qxF -- '--stdin' "$d/argv"; then pass "prefilter: a rewritten clone is hashed (nothing withheld, plain walk)"; else fail "prefilter: a rewritten clone was withheld"; fi
+case "$out" in
+    *"would clone "*) pass "prefilter: a rewritten clone is planned to share again" ;;
+    *) fail "prefilter: rewritten clone not planned (got: $out)" ;;
+esac
+
+# --exclude is the complete protection for a tree: a clone under it is never
+# offered, withheld into a group, or touched, even when its twin is in scope.
+d3="$WORK/prefilter-exclude"
+mkdir -p "$d3/keep" "$d3/ex"
+head -c 65536 /dev/urandom >"$d3/keep/a"
+cp -c "$d3/keep/a" "$d3/ex/b"
+cp "$d3/keep/a" "$d3/keep/plain"
+ib=$(ino "$d3/ex/b")
+out=$(PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d3" --min 1 --exclude '**/ex/**' --apply --verbose 2>&1)
+case "$out" in
+    *"$d3/ex/b"*) fail "prefilter: an excluded clone appeared in the run (got: $out)" ;;
+    *) pass "prefilter: an excluded clone is not in the run" ;;
+esac
+assert_eq "prefilter: an excluded clone is untouched" "$(ino "$d3/ex/b")" "$ib"
+
+# An --exclude in syntax the prefilter does not read the way fclones does (an
+# extended group here) is not left to its guess: the whole run is the plain walk,
+# where fclones applies the pattern. first is an independent copy and the group's
+# canonical, so a withheld ex/b would be swapped for a clone of it.
+d6="$WORK/prefilter-extglob"
+mkdir -p "$d6/keep" "$d6/ex"
+head -c 65536 /dev/urandom >"$d6/first"
+cp "$d6/first" "$d6/keep/a"
+cp -c "$d6/keep/a" "$d6/ex/b"
+ib=$(ino "$d6/ex/b")
+PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d6" --min 1 --exclude '**/@(ex|other)/**' --apply >/dev/null 2>&1
+if grep -qxF -- '--stdin' "$d/argv"; then fail "prefilter: an exclude it cannot read still fed fclones a list"; else pass "prefilter: an exclude it cannot read is left to the plain fclones walk"; fi
+assert_eq "prefilter: a clone excluded by an extended group is untouched" "$(ino "$d6/ex/b")" "$ib"
+
+# fclones lists a group by path and the apply clones from the first file listed.
+# sub/old is the set's oldest file and sorts last, so offering it would make
+# plain the canonical and re-clone both existing clones. The plan has to be the
+# one a full hash gives, line for line.
+d7="$WORK/prefilter-order"
+mkdir -p "$d7/sub"
+head -c 65536 /dev/urandom >"$d7/sub/old"
+cp -c "$d7/sub/old" "$d7/a"
+cp "$d7/sub/old" "$d7/plain"
+out=$(PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d7" --min 1 2>/dev/null)
+plain_out=$(PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d7" --min 1 --no-prefilter 2>/dev/null)
+assert_eq "prefilter: the canonical is the one a full hash picks" \
+    "$(printf '%s\n' "$out" | grep -E '^(would clone|already saved|would reclaim)')" \
+    "$(printf '%s\n' "$plain_out" | grep -E '^(would clone|already saved|would reclaim)')"
+
+# ---- fclones' hash cache is on by default, and --no-cache turns it off ----
+d4="$WORK/cache"
+mkdir -p "$d4/scope"
+PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d4/scope" >/dev/null 2>&1 || true
+if grep -qxF -- '--cache' "$d/argv"; then pass "cache: fclones' hash cache is used by default"; else fail "cache: --cache not passed (argv: $(tr '\n' '|' <"$d/argv"))"; fi
+PATH="$d/bin:$PATH" "$SCRIPT" --scope "$d4/scope" --no-cache >/dev/null 2>&1 || true
+if grep -qxF -- '--cache' "$d/argv"; then fail "cache: --no-cache still passed --cache"; else pass "cache: --no-cache leaves the cache off"; fi
+
 # ---- the apply never destroys a concurrent write ----
 # Python rather than shell: the gaps are microseconds wide, so these cases wrap the
 # engine's own swap and scan to place a real writer in them.
 if ! python3 "$HERE/test_concurrent_writers.py"; then FAILED=1; fi
 if ! python3 "$HERE/test_inspect.py"; then FAILED=1; fi
+if ! python3 "$HERE/test_prefilter.py"; then FAILED=1; fi
 
 # ---- a real run leaves no work files in the tree, and skips its own directory ----
 d="$WORK/workdir"
