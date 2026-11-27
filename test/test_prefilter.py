@@ -305,7 +305,8 @@ def test_walk(root: Path) -> None:
     try:
         offered, sets, reach = walk(cases, min_size=100, excludes=["**/ex/**"])
     finally:
-        os.chmod(cases / "locked", 0o755)
+        # Owner access is all the cleanup needs to recurse.
+        os.chmod(cases / "locked", 0o700)
     check(
         "walk: the control set is withheld",
         [sorted(s) for s in sets] == [[str(cases / "set1"), str(cases / "set2")]],
