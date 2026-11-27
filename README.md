@@ -399,14 +399,12 @@ Exclude such a tool's working trees, for example a CI runner's checkouts.
 ```sh
 sh test/test.sh                              # integration tests (macOS 15+, real clonefile, fclones)
 pip install -r requirements-dev.txt && mypy  # strict type check of lib/apply.py
-npx pyright@<version>                        # the same, with pyright
 ```
 
-`requirements-dev.txt` pins mypy and `.github/workflows/ci.yml` pins pyright;
-use the same ones, since another release can report differently. CI also runs
-the checks every Curlew Labs repository shares
+`requirements-dev.txt` pins mypy; use the same one, since another release can
+report differently. CI also runs the checks every Curlew Labs repository shares
 ([ci-baseline](https://github.com/curlewlabs-com/ci-baseline)): among them
-shellcheck, shfmt, ruff and prettier, under this repository's `pyproject.toml`
+shellcheck, shfmt, ruff, prettier and strict pyright, under this repository's `pyproject.toml`
 and `.editorconfig`.
 
 `lib/apply.py` brands path strings as `FullPath` vs `Basename` (distinct

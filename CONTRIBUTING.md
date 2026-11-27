@@ -20,12 +20,11 @@ own (see the README "Development" section):
 ```sh
 sh test/test.sh                              # integration tests - macOS 15+, real clonefile + fclones
 pip install -r requirements-dev.txt && mypy  # strict type check of lib/apply.py
-npx pyright@<version>                        # the same, with pyright (the release ci.yml pins)
 ```
 
 CI also runs the checks every Curlew Labs repository shares
 ([ci-baseline](https://github.com/curlewlabs-com/ci-baseline)), among them
-shellcheck, shfmt, ruff and prettier, under this repository's `pyproject.toml`
+shellcheck, shfmt, ruff, prettier and strict pyright, under this repository's `pyproject.toml`
 and `.editorconfig`.
 
 `test/test.sh` also runs `test/test_concurrent_writers.py`, which races the apply
@@ -44,8 +43,7 @@ anywhere.
   test.
 - **Pin dependencies exactly.** A GitHub Action is pinned to its release's
   commit SHA with the version beside it, since a tag can be moved, and tools
-  are pinned to exact versions (`requirements-dev.txt` and the `pyright` pin in
-  CI), so a
+  are pinned to exact versions (`requirements-dev.txt`), so a
   resolver cannot silently move them. Match that when adding any. That
   includes the Rust release CI builds `fclones` with, and `fclones` itself
   (`cargo install fclones --version <version> --locked`). Renovate proposes
