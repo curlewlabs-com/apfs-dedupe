@@ -235,7 +235,7 @@ def test_walk(root: Path) -> None:
         len(sets) == 1 and sorted(sets[0]) == members,
         str(sets),
     )
-    withheld = set(sets[0][1:]) if sets else set()
+    withheld: set[str] = set(sets[0][1:]) if sets else set()
     check(
         "walk: fclones reaches exactly the files not withheld",
         reach == all_files(d) - withheld,
